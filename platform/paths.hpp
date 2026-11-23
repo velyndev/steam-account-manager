@@ -19,6 +19,13 @@ std::filesystem::path data_dir();
 // Data root ignoring any custom location.
 std::filesystem::path default_data_dir();
 
+#ifdef SAM_UI_CAPTURE
+// Dev-only (the --ui-capture harness): makes data_dir() return `dir` instead of resolving
+// portable.flag, the registry or %LOCALAPPDATA%. Must run before the first data_dir() call,
+// which caches its result; a later call is ignored and returns false.
+bool set_data_dir_override(const std::filesystem::path& dir);
+#endif
+
 bool using_custom_data_dir();
 
 // If a custom location was set but unusable (e.g. a removed USB drive), returns

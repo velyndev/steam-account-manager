@@ -96,10 +96,63 @@ function Ensure-SingleFile {
     Invoke-WebRequest -Uri $Url -OutFile $target -UseBasicParsing
 }
 
+function Ensure-ZipDir {
+    param(
+        [string] $Name,
+        [string] $Url,
+        [string] $InnerDir
+    )
+
+    $target = Join-Path $ThirdParty $Name
+
+    if ((Test-Path $target) -and -not $Force) {
+        Write-Step "$Name already present, skipping."
+        return
+    }
+
+    if ($Force -and (Test-Path $target)) {
+        Write-Step "removing existing $Name"
+        Remove-Item -Recurse -Force $target
+    }
+
+    $staging = Join-Path ([IO.Path]::GetTempPath()) ("sam-" + [Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $staging | Out-Null
+    try {
+        $zip = Join-Path $staging "download.zip"
+        Write-Step "downloading $Name"
+        Invoke-WebRequest -Uri $Url -OutFile $zip -UseBasicParsing
+        Expand-Archive -Path $zip -DestinationPath (Join-Path $staging "x")
+        Move-Item -Path (Join-Path $staging (Join-Path "x" $InnerDir)) -Destination $target
+    } finally {
+        Remove-Item -Recurse -Force $staging -ErrorAction SilentlyContinue
+    }
+}
+
 Ensure-GitClone -Name "imgui" `
     -Url "https://github.com/ocornut/imgui.git" `
-    -Tag "docking" `
+    -Tag "v1.93.0-docking" `
     -Shallow
+
+# Facet: the Dear ImGui design framework the UI is built on. Pinned to a commit, not a
+# tag, so the clone is a full one. Built by scripts\build_facet.ps1 through the wrapper
+# project in cmake\facet, which the vcxproj runs before compiling.
+Ensure-GitClone -Name "facet" `
+    -Url "https://github.com/velyndev/imgui-facet.git" `
+    -Tag "bbbf05b27d537829e079d89c0960d3168d4f805c"
+
+# FreeType: the rasterizer Facet needs to pick the Segoe UI Variable instances. Same tag
+# and the same options as Facet's cmake\FacetDeps.cmake; built by the same wrapper project.
+Ensure-GitClone -Name "freetype" `
+    -Url "https://github.com/freetype/freetype.git" `
+    -Tag "VER-2-15-0" `
+    -Shallow
+
+# protobuf sources of the release whose headers and Release library are tracked in
+# third_party/protobuf. Only Debug builds use them: build_facet.ps1 compiles a /MTd
+# libprotobufd.lib from them, which the tracked /MT library cannot replace.
+Ensure-ZipDir -Name "protobuf-src" `
+    -Url "https://github.com/protocolbuffers/protobuf/releases/download/v21.12/protobuf-cpp-3.21.12.zip" `
+    -InnerDir "protobuf-3.21.12"
 
 Ensure-GitClone -Name "mbedtls" `
     -Url "https://github.com/Mbed-TLS/mbedtls.git" `

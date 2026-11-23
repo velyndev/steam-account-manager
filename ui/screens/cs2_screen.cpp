@@ -1,717 +1,432 @@
 #include "ui/screens/cs2_screen.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
-#include <ctime>
-#include <functional>
+#include <memory>
+#include <optional>
 #include <string>
-#include <utility>
-#include <vector>
 
 #include <imgui.h>
 
-#include "core/cs2_gc/cs2_gc_client.hpp"
-#include "core/steam_login/session.hpp"
-#include "core/strings.hpp"
+#include <facet/core/icons.h>
+#include <facet/core/layout.h>
+#include <facet/core/scale.h>
+#include <facet/core/text.h>
+#include <facet/core/theme.h>
+#include <facet/widgets/buttons.h>
+#include <facet/widgets/containers.h>
+#include <facet/widgets/display.h>
+#include <facet/widgets/layout.h>
+#include <facet/widgets/navigation.h>
+#include <facet/widgets/overlays.h>
+
+#include "platform/registry.hpp"
+#include "ui/icons.hpp"
+#include "ui/kit/account.hpp"
+#include "ui/kit/actions.hpp"
+#include "ui/kit/navigation.hpp"
+#include "ui/kit/page.hpp"
+#include "ui/kit/transient.hpp"
+#include "ui/screens/cs2/cs2_internal.hpp"
 #include "ui/screens/cs2_screen_state.hpp"
-#include "ui/theme.hpp"
 #include "ui/util.hpp"
-#include "ui/widgets/avatar_cache.hpp"
-#include "ui/widgets/redacted_text.hpp"
 
 namespace sam::ui::screens {
 
 namespace {
 
-bool drop_claimed_this_week(const cs2_gc::WeeklyReward& reward) {
-    if (!reward.loaded || reward.available) return false;
-    const std::int64_t now = now_seconds();
-    const std::int64_t last_reset = next_weekly_reset(now) - 7 * 86400;
-    return reward.generation_time >= static_cast<std::uint32_t>(last_reset);
+using cs2::TokenState;
+
+constexpr float kBlockWidth = 520.0F;   // units; the width of the centered empty states
+constexpr float kPickerWidth = 260.0F;  // units; the account picker in the connection card
+constexpr float kStateWidth = 280.0F;   // units; the fixed state column of the connection card
+
+// Moves the cursor so a block of `width` units that follows is centered in the page. An item
+// is always submitted right after it, so the window bounds stay correct.
+void center_next(float width) {
+    const float pad = std::max(0.0F, (ImGui::GetContentRegionAvail().x - facet::Px(width)) * 0.5F);
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + pad);
 }
 
-std::string cs2_account_label(const app::AppState& state, const core::Account& a) {
-    return a.web.persona_name.empty() ? widgets::login_label(state, a) : a.web.persona_name;
-}
-
-bool draw_cs2_account_chip(const app::AppState& state, const core::Account* picked) {
-    constexpr float kH = 40.0F;
-    constexpr float kW = 260.0F;
-    const ImVec2 p0 = ImGui::GetCursorScreenPos();
-    const bool clicked = ImGui::InvisibleButton("##cs2_acct_chip", ImVec2(kW, kH));
-    const bool hov = ImGui::IsItemHovered();
-    const ImVec2 p1(p0.x + kW, p0.y + kH);
-    auto* dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(p0, p1,
-                      ImGui::ColorConvertFloat4ToU32(hov ? theme::panel_hover() : theme::panel()),
-                      6.0F);
-    dl->AddRect(p0, p1, ImGui::ColorConvertFloat4ToU32(theme::border()), 6.0F, 1.0F);
-    const float pad = 6.0F;
-    const float av = kH - 2.0F * pad;
-    const ImVec2 av0(p0.x + pad, p0.y + pad);
-    const ImVec2 av1(av0.x + av, av0.y + av);
-    const float av_round = av * (8.0F / 48.0F);
-    dl->AddRectFilled(av0, av1, IM_COL32(40, 50, 60, 180), av_round);
-    if (picked != nullptr)
-        if (auto* srv = widgets::avatar_for(picked->web.avatar_url_full))
-            dl->AddImageRounded(reinterpret_cast<ImTextureID>(srv), av0, av1, ImVec2(0, 0),
-                                ImVec2(1, 1), IM_COL32_WHITE, av_round);
-    const std::string label =
-        picked != nullptr ? cs2_account_label(state, *picked) : std::string("Select an account");
-    const ImVec2 ts = ImGui::CalcTextSize(label.c_str());
-    dl->AddText(ImVec2(av1.x + 8.0F, p0.y + (kH - ts.y) * 0.5F),
-                ImGui::ColorConvertFloat4ToU32(picked != nullptr ? theme::text() : theme::dim_text()),
-                label.c_str());
-    return clicked;
-}
-
-void draw_cs2_account_picker(app::AppState& state, char (&search)[64]) {
-    ImGui::SetNextItemWidth(220.0F);
-    ImGui::InputTextWithHint("##cs2acctsearch", "filter", search, sizeof(search));
-
-    const std::string af = core::to_lower(search);
-    std::vector<const core::Account*> accts;
-    for (auto& a : state.vault.accounts) {
-        if (a.steam_id_64 == 0) continue;
-        if (!af.empty() &&
-            core::to_lower(cs2_account_label(state, a)).find(af) == std::string::npos &&
-            core::to_lower(a.login).find(af) == std::string::npos)
-            continue;
-        accts.push_back(&a);
+// "under a minute", "12 min", "2 h 5 min".
+std::string duration_text(std::int64_t seconds) {
+    if (seconds < 60) return "under a minute";
+    const std::int64_t minutes = seconds / 60;
+    char buf[48];
+    if (minutes < 60) {
+        std::snprintf(buf, sizeof(buf), "%lld min", static_cast<long long>(minutes));
+    } else {
+        std::snprintf(buf, sizeof(buf), "%lld h %lld min", static_cast<long long>(minutes / 60),
+                      static_cast<long long>(minutes % 60));
     }
+    return buf;
+}
 
-    constexpr float kChipH = 44.0F;
-    constexpr float kChipGap = 8.0F;
-    ImGui::BeginChild("##cs2acctgrid", ImVec2(420.0F, 280.0F), ImGuiChildFlags_Borders);
-    const float gw = ImGui::GetContentRegionAvail().x;
-    const int cols = std::max(1, static_cast<int>(gw / 220.0F + 0.5F));
-    const float chip_w = (gw - static_cast<float>(cols - 1) * kChipGap) / static_cast<float>(cols);
-    const float row_pitch = kChipH + ImGui::GetStyle().ItemSpacing.y;
-    const int total = static_cast<int>(accts.size());
-    const int rows = (total + cols - 1) / cols;
-    auto* dl = ImGui::GetWindowDrawList();
-    ImGuiListClipper clipper;
-    clipper.Begin(rows, row_pitch);
-    while (clipper.Step()) {
-        for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
-            for (int c = 0; c < cols; ++c) {
-                const int idx = row * cols + c;
-                if (idx >= total) break;
-                const core::Account& a = *accts[idx];
-                if (c > 0) ImGui::SameLine(0.0F, kChipGap);
-                ImGui::PushID(a.id.c_str());
-                const bool sel = state.selected_account_id == a.id;
-                const ImVec2 p0 = ImGui::GetCursorScreenPos();
-                const ImVec2 p1(p0.x + chip_w, p0.y + kChipH);
-                if (ImGui::InvisibleButton("##chip", ImVec2(chip_w, kChipH))) {
-                    state.selected_account_id = a.id;
-                    ImGui::CloseCurrentPopup();
-                }
-                const bool hov = ImGui::IsItemHovered();
-                ImU32 bg;
-                if (sel) {
-                    ImVec4 ac = theme::accent();
-                    ac.w = 0.20F;
-                    bg = ImGui::ColorConvertFloat4ToU32(ac);
+// The step of the connect the client's stage text belongs to (see Cs2GcClient::run).
+const char* connect_step_text(const Cs2ScreenState& s) {
+    if (s.has_snapshot) return "Step 3 of 3: loading the inventory";
+    if (s.status.starts_with("Connecting to CS2")) return "Step 2 of 3: starting the CS2 session";
+    if (s.status.starts_with("CS2 busy")) return "Step 1 of 3: CS2 is busy elsewhere, retrying";
+    return "Step 1 of 3: signing in to Steam";
+}
+
+// What a failed connect means for the user, from the client's error text: a heading, one
+// plain sentence with the likely cause and what to do, and whether renewing the sign-in helps.
+struct FailureText {
+    const char* title;
+    const char* hint;
+    bool token_problem;
+};
+FailureText describe_failure(const std::string& err) {
+    if (err.find("signed in elsewhere") != std::string::npos)
+        return {"The account is playing elsewhere",
+                "Steam or an hour booster is using this account's CS2 session. Stop it there, then try again.",
+                false};
+    if (err.find("logon rejected") != std::string::npos || err.find("no refresh token") != std::string::npos)
+        return {"Steam did not accept the CS2 sign-in",
+                "The sign-in has probably expired. Renew it, then connect again.", true};
+    if (err.find("did not respond") != std::string::npos || err.find("timed out") != std::string::npos)
+        return {"CS2's servers did not answer",
+                "They are often slow or busy for a minute. Wait a moment, then try again.", false};
+    if (err.find("lost") != std::string::npos || err.find("dropped") != std::string::npos)
+        return {"The connection dropped", "Steam ended the session. Connect again to continue.", false};
+    return {"Could not connect to CS2", "Something went wrong while connecting. Try again in a moment.", false};
+}
+
+// Whether Steam on this PC is signed in to the account. Read at most once a second, since it
+// is a registry read.
+bool is_active_steam_user(const core::Account& a) {
+    static std::chrono::steady_clock::time_point last{};
+    static std::optional<std::uint32_t> cached;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last > std::chrono::seconds(1)) {
+        cached = platform::registry::read_active_user();
+        last = now;
+    }
+    return cached && *cached != 0 && static_cast<std::uint32_t>(a.steam_id_64 & 0xffffffffULL) == *cached;
+}
+
+// The connection card: the account picker (the card is where the account is chosen, so it is
+// shown once), the state in a column of fixed width so the pill never moves with the name, and
+// the actions of the state. Its height is the same in every state, so nothing below it jumps;
+// in a narrow window the actions take a second row that is always reserved.
+void connection_card(app::AppState& state, core::Account* acct, Cs2ScreenState* s) {
+    const facet::Theme& t = facet::T();
+    facet::BeginCard("##connection");
+    const float avail = ImGui::GetContentRegionAvail().x / facet::Px(1.0F);
+    float& actions_w = *ImGui::GetStateStorage()->GetFloatRef(ImGui::GetID("##actions-w"), 180.0F);
+    // Narrower picker and state column below 900 units, so the actions still fit on the row
+    // in a 900 px window and the card stays one row tall.
+    const bool compact = avail < 900.0F;
+    const float picker_w = compact ? 200.0F : kPickerWidth;
+    const float state_w = compact ? 190.0F : kStateWidth;
+    const float lead = 40.0F + picker_w + state_w + 3.0F * t.spacing.lg;
+    const bool one_row = avail >= lead + actions_w;
+    // On one row the state column takes the slack, so the buttons end at the right edge without
+    // a StackSpacer (which shifted the last button out of line).
+    const float state_col = one_row ? std::max(state_w, avail - lead + state_w - actions_w - 2.0F) : state_w;
+
+    facet::BeginStack("##conn-row", {.orientation = facet::Orientation::Horizontal,
+                                     .gap = facet::Gap::Loose,
+                                     .align = facet::LayoutAlign::Center,
+                                     .width = avail});
+    if (acct != nullptr)
+        kit::avatar(state, *acct, {.diameter = 40.0F});
+    else
+        facet::Skeleton({.shape = facet::SkeletonShape::Circle, .height = 40.0F});
+    (void)kit::account_picker("##cs2-account", state, &state.selected_account_id,
+                              {.filter = &kit::has_steam_id,
+                               .placeholder = "Choose an account",
+                               .empty_text = "No account has a Steam ID yet. Refresh all accounts first.",
+                               .width = picker_w});
+
+    // The state column: a vertical stack of fixed width (pill over caption).
+    facet::BeginStack("##conn-state", {.gap = facet::Gap::Tight, .width = state_col});
+    const char* detail = "";
+    std::string detail_buf;
+    if (s == nullptr) {
+        facet::StatusPill("No account", {.icon = facet::Icon("info")});
+    } else {
+        switch (s->phase) {
+            case Cs2Phase::Idle:
+                facet::StatusPill("Not connected", {.icon = facet::Icon("info")});
+                detail = s->status == "Disconnected" ? "Disconnected" : "";
+                break;
+            case Cs2Phase::Connecting:
+                facet::StatusPill("Connecting", {.tone = facet::Tone::Accent, .liveDot = true});
+                detail = connect_step_text(*s);
+                break;
+            case Cs2Phase::Connected:
+                facet::StatusPill("Connected", {.tone = facet::Tone::Success, .liveDot = true});
+                if (cs2::batch_running(*s)) {
+                    detail_buf = "Moving items, " + std::to_string(cs2::ops_finished(*s)) + " of " +
+                                 std::to_string(s->ops.size()) + " done";
                 } else {
-                    bg = ImGui::ColorConvertFloat4ToU32(hov ? theme::panel_hover() : theme::panel());
+                    detail_buf = "For " + duration_text(now_seconds() - s->connected_since);
                 }
-                dl->AddRectFilled(p0, p1, bg, 6.0F);
-
-                const float pad = 6.0F;
-                const float av = kChipH - 2.0F * pad;
-                const ImVec2 av0(p0.x + pad, p0.y + pad);
-                const ImVec2 av1(av0.x + av, av0.y + av);
-                const float av_round = av * (8.0F / 48.0F);
-                dl->AddRectFilled(av0, av1, IM_COL32(40, 50, 60, 180), av_round);
-                if (auto* srv = widgets::avatar_for(a.web.avatar_url_full))
-                    dl->AddImageRounded(reinterpret_cast<ImTextureID>(srv), av0, av1, ImVec2(0, 0),
-                                        ImVec2(1, 1), IM_COL32_WHITE, av_round);
-
-                const float tx0 = av1.x + 8.0F;
-                const float tx1 = p1.x - pad;
-                const std::string label = cs2_account_label(state, a);
-                const ImVec2 ts = ImGui::CalcTextSize(label.c_str());
-                const float region_w = tx1 - tx0;
-                const float text_x = tx0 + std::max(0.0F, (region_w - ts.x) * 0.5F);
-                const float text_y = p0.y + (kChipH - ts.y) * 0.5F;
-                dl->PushClipRect(ImVec2(tx0, p0.y), ImVec2(tx1, p1.y), true);
-                dl->AddText(ImVec2(text_x, text_y), ImGui::ColorConvertFloat4ToU32(theme::text()),
-                            label.c_str());
-                dl->PopClipRect();
-                if (sel)
-                    dl->AddRect(p0, p1, ImGui::ColorConvertFloat4ToU32(theme::accent()), 6.0F, 2.0F);
-                if (hov && ts.x > region_w) set_tooltip("%s", label.c_str());
-                ImGui::PopID();
-            }
+                detail = detail_buf.c_str();
+                break;
+            case Cs2Phase::Failed:
+                facet::StatusPill("Connection failed", {.tone = facet::Tone::Destructive, .icon = facet::Icon("error")});
+                break;
         }
     }
-    clipper.End();
-    ImGui::EndChild();
-}
+    // A caption line is always there, so the column keeps its height.
+    cs2::note("%s", detail[0] != '\0' ? detail : " ");
+    facet::EndStack();
 
-void start_client(app::AppState& state, const core::Account& acct) {
-    auto& s = *state.cs2_screen;
-    s.error.clear();
-    s.connected = false;
-    s.snapshot = {};
-    s.open_unit = 0;
-    s.unit_contents.clear();
-    s.status = "Starting";
-
-    cs2_gc::Cs2Credentials creds;
-    creds.refresh_token = app::cs2_client_token(acct);
-    creds.steam_id = acct.steam_id_64;
-    creds.proxy = std::string(acct.proxy.begin(), acct.proxy.end());
-    creds.claimed_generation = acct.cs2.weekly_drop_claimed_generation;
-    creds.claimed_ids = acct.cs2.weekly_drop_claimed_ids;
-    creds.claimed_names = acct.cs2.weekly_drop_claimed_names;
-
-    app::AppState* st = &state;
-    const std::string aid = acct.id;
-
-    auto valid = [st, aid] { return st->cs2_screen && st->cs2_screen->account_id == aid; };
-
-    cs2_gc::Cs2Callbacks cb;
-    cb.on_status = [st, aid, valid](std::string text) {
-        st->post_ui_callback([st, aid, valid, text = std::move(text)] {
-            if (!valid()) return;
-            st->cs2_screen->status = text;
-            st->cs2_screen->connected = (text == "Ready");
-        });
-    };
-    cb.on_snapshot = [st, aid, valid](cs2_gc::Snapshot snap) {
-        st->post_ui_callback([st, aid, valid, snap = std::move(snap)]() mutable {
-            if (!valid()) return;
-            st->cs2_screen->snapshot = std::move(snap);
-            st->apply_gc_snapshot_cache(aid, st->cs2_screen->snapshot);
-
-            core::Account* acc = st->find_account(aid);
-            if (acc == nullptr) return;
-            const cs2_gc::WeeklyReward& reward = st->cs2_screen->snapshot.reward;
-            if (st->settings.cs2_gc.auto_mark_claimed && reward.loaded && !reward.available) {
-                const std::int64_t now = now_seconds();
-                const bool claimed = drop_claimed_this_week(reward);
-                const bool marked = acc->cs2.weekly_drop_reset_unix > now;
-                if (claimed != marked) {
-                    acc->cs2.weekly_drop_reset_unix = claimed ? next_weekly_reset(now) : 0;
-                    st->vault_dirty = true;
-                    st->save_vault_if_dirty();
-                }
-            }
-        });
-    };
-    cb.on_unit_contents = [st, aid, valid](std::uint64_t unit, std::vector<cs2_gc::DisplayItem> items) {
-        st->post_ui_callback([st, aid, valid, unit, items = std::move(items)]() mutable {
-            if (!valid()) return;
-            auto& cs = *st->cs2_screen;
-            cs.unit_loading = false;
-            if (cs.open_unit == unit) cs.unit_contents = std::move(items);
-        });
-    };
-    cb.on_error = [st, aid, valid](std::string err) {
-        st->post_ui_callback([st, aid, valid, err = std::move(err)] {
-            if (!valid()) return;
-            auto& cs = *st->cs2_screen;
-            cs.error = err;
-            cs.action_busy = false;
-            cs.unit_loading = false;
-        });
-    };
-    cb.on_action_done = [st, aid, valid](std::string msg) {
-        st->post_ui_callback([st, aid, valid, msg = std::move(msg)] {
-            if (!valid()) return;
-            auto& cs = *st->cs2_screen;
-            cs.action_busy = false;
-            cs.error.clear();
-            cs.status = msg;
-        });
-    };
-
-    cb.on_reward_claimed = [st, aid](std::uint32_t gen, std::vector<std::uint64_t> ids,
-                                     std::vector<std::string> names) {
-        st->post_ui_callback([st, aid, gen, ids = std::move(ids),
-                              names = std::move(names)]() mutable {
-            auto* acc = st->find_account(aid);
-            if (!acc) return;
-            acc->cs2.weekly_drop_claimed_generation = gen;
-            acc->cs2.weekly_drop_claimed_ids = std::move(ids);
-            acc->cs2.weekly_drop_claimed_names = std::move(names);
-            acc->cs2.weekly_drop_reset_unix = next_weekly_reset(now_seconds());
-            st->vault_dirty = true;
-            st->save_vault_if_dirty();
-        });
-    };
-
-    s.client = std::make_unique<cs2_gc::Cs2GcClient>(std::move(creds), std::move(cb));
-}
-
-void discard_client(Cs2ScreenState& s) {
-    if (s.client) cs2_gc::retire(std::move(s.client));
-}
-
-bool draw_tile(const cs2_gc::DisplayItem& it, float w, float h, bool selected) {
-    const float inset = h * 0.12F;
-    const ImVec2 c0 = ImGui::GetCursorScreenPos();
-    const bool clicked = ImGui::InvisibleButton("##tile", ImVec2(w, h));
-    const ImVec2 c1(c0.x + w, c0.y + h);
-    auto* dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(c0, c1, ImGui::ColorConvertFloat4ToU32(theme::panel_hover()), 6.0F);
-    if (!it.icon_url.empty())
-        if (auto* srv = widgets::texture_for(it.icon_url))
-            dl->AddImageRounded(reinterpret_cast<ImTextureID>(srv),
-                                ImVec2(c0.x + inset, c0.y + inset),
-                                ImVec2(c1.x - inset, c1.y - inset), ImVec2(0, 0), ImVec2(1, 1),
-                                IM_COL32_WHITE, 4.0F);
-    const ImU32 border = it.border_rgb != 0
-                             ? IM_COL32((it.border_rgb >> 16) & 0xFF, (it.border_rgb >> 8) & 0xFF,
-                                        it.border_rgb & 0xFF, 255)
-                             : ImGui::ColorConvertFloat4ToU32(theme::border());
-
-    dl->AddRect(c0, c1, border, 6.0F, 2.0F);
-    if (selected)
-        dl->AddRect(c0, c1, ImGui::ColorConvertFloat4ToU32(theme::accent()), 6.0F, 3.0F);
-    if (it.is_storage_unit && it.item_count >= 0) {
-        char cnt[24];
-        std::snprintf(cnt, sizeof(cnt), "%d items", it.item_count);
-        dl->AddText(ImVec2(c0.x + inset, c1.y - inset - ImGui::GetTextLineHeight()), IM_COL32_WHITE,
-                    cnt);
-    }
-    if (ImGui::IsItemHovered() && !it.name.empty()) set_tooltip("%s", it.name.c_str());
-    return clicked;
-}
-
-template <class SelFn, class ClickFn>
-void draw_grid(const std::vector<cs2_gc::DisplayItem>& items, int& page, int cols, int rows,
-               SelFn is_selected, ClickFn on_click) {
-    const int per_page = cols * rows;
-    const int total = static_cast<int>(items.size());
-    const int pages = (total + per_page - 1) / per_page;
-    page = std::clamp(page, 0, std::max(0, pages - 1));
-
-    constexpr float gap = 6.0F;
-    const float avail = ImGui::GetContentRegionAvail().x;
-    float tile_w = (avail - gap * static_cast<float>(cols - 1)) / static_cast<float>(cols);
-    tile_w = std::clamp(tile_w, 56.0F, 132.0F);
-    const float tile_h = tile_w * 0.72F;
-
-    const int start = page * per_page;
-    for (int i = 0; i < per_page; ++i) {
-        if (i % cols > 0) ImGui::SameLine(0.0F, gap);
-        const int idx = start + i;
-        if (idx >= total) {
-            ImGui::Dummy(ImVec2(tile_w, tile_h));
-            continue;
-        }
-        const auto& it = items[idx];
-        ImGui::PushID(reinterpret_cast<void*>(static_cast<std::uintptr_t>(it.id)));
-        if (draw_tile(it, tile_w, tile_h, is_selected(it))) on_click(it);
-        ImGui::PopID();
-    }
-
-    if (pages > 1) {
-        ImGui::BeginDisabled(page <= 0);
-        if (ImGui::SmallButton("<")) --page;
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        ImGui::Text("Page %d/%d", page + 1, pages);
-        ImGui::SameLine();
-        ImGui::BeginDisabled(page >= pages - 1);
-        if (ImGui::SmallButton(">")) ++page;
-        ImGui::EndDisabled();
-    }
-}
-
-void progress_bar_centered(float frac, float width, const char* text) {
-    frac = std::clamp(frac, 0.0F, 1.0F);
-    ImGui::ProgressBar(frac, ImVec2(width, 0.0F), "");
-    const ImVec2 r0 = ImGui::GetItemRectMin();
-    const ImVec2 r1 = ImGui::GetItemRectMax();
-    const ImVec2 ts = ImGui::CalcTextSize(text);
-    ImGui::GetWindowDrawList()->AddText(
-        ImVec2(r0.x + (r1.x - r0.x - ts.x) * 0.5F, r0.y + (r1.y - r0.y - ts.y) * 0.5F),
-        ImGui::GetColorU32(ImGuiCol_Text), text);
-}
-
-void draw_units(Cs2ScreenState& s, float width) {
-    ImGui::BeginChild("##cs2_units", ImVec2(width, 0.0F),
-                      ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_Borders);
-    if (s.open_unit != 0) {
-        const cs2_gc::DisplayItem* open = nullptr;
-        for (const auto& u : s.snapshot.units)
-            if (u.id == s.open_unit) { open = &u; break; }
-        ImGui::TextUnformatted(open != nullptr ? open->name.c_str() : "Storage unit");
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Close")) {
-            s.open_unit = 0;
-            s.unit_contents.clear();
-            s.selected_unit.clear();
-        }
-        ImGui::Separator();
-        if (s.unit_loading) {
-            ImGui::TextDisabled("Loading contents...");
-        } else if (s.unit_contents.empty()) {
-            ImGui::TextDisabled("(empty)");
+    // The buttons go straight into the row stack (a nested stack shifted its first button
+    // down); in a narrow window they get a stack of their own on the second row.
+    auto buttons = [&] {
+        float x0 = 0.0F;
+        float x1 = 0.0F;
+        auto track = [&] {
+            if (x0 == 0.0F) x0 = ImGui::GetItemRectMin().x;
+            x1 = ImGui::GetItemRectMax().x;
+        };
+        if (s != nullptr && s->phase == Cs2Phase::Connecting) {
+            if (facet::Button("Cancel connecting")) cs2::disconnect(*s);
+            track();
+        } else if (s != nullptr && s->phase == Cs2Phase::Connected) {
+            if (facet::Button("Refresh", {.icon = facet::Icon("refresh")})) cs2::refresh(*s);
+            track();
+            if (facet::Button("Disconnect", {.icon = facet::Icon("close")})) cs2::disconnect(*s);
+            track();
         } else {
-            draw_grid(
-                s.unit_contents, s.contents_page, 5, 5,
-                [&](const cs2_gc::DisplayItem& it) { return s.selected_unit.count(it.id) != 0; },
-                [&](const cs2_gc::DisplayItem& it) {
-                    if (s.selected_unit.count(it.id) != 0) s.selected_unit.erase(it.id);
-                    else s.selected_unit.insert(it.id);
-                });
-            ImGui::Spacing();
-            char lbl[40];
-            std::snprintf(lbl, sizeof(lbl), "Move out selected (%zu)", s.selected_unit.size());
-            ImGui::BeginDisabled(s.action_busy || s.selected_unit.empty());
-            if (ImGui::SmallButton(lbl) && s.client) {
-                s.action_busy = true;
-                s.error.clear();
-                s.client->move_out_many(
-                    s.open_unit,
-                    std::vector<std::uint64_t>(s.selected_unit.begin(), s.selected_unit.end()));
-                s.selected_unit.clear();
-                s.unit_loading = true;
-                s.contents_page = 0;
-                s.client->load_unit(s.open_unit);
-            }
-            ImGui::EndDisabled();
-            ImGui::SameLine();
-            ImGui::BeginDisabled(s.selected_unit.empty());
-            if (ImGui::SmallButton("Clear")) s.selected_unit.clear();
-            ImGui::EndDisabled();
+            ImGui::Dummy(ImVec2(0.0F, facet::Px(t.metrics.controlHeight)));
         }
-    } else {
-        ImGui::TextUnformatted("Storage units");
-        ImGui::Separator();
-        if (s.snapshot.units.empty()) {
-            ImGui::TextDisabled("No storage units in this inventory.");
-        } else {
-            draw_grid(
-                s.snapshot.units, s.units_page, 5, 5,
-                [](const cs2_gc::DisplayItem&) { return false; },
-                [&](const cs2_gc::DisplayItem& it) {
-                    if (s.client == nullptr) return;
-                    s.open_unit = it.id;
-                    s.unit_contents.clear();
-                    s.unit_loading = true;
-                    s.contents_page = 0;
-                    s.selected_unit.clear();
-                    s.client->load_unit(it.id);
-                });
-        }
+        if (x1 > x0) actions_w = (x1 - x0) / facet::Px(1.0F);
+    };
+    if (one_row) buttons();
+    facet::EndStack();
+    if (!one_row) {
+        ImGui::Dummy(ImVec2(0.0F, facet::Px(t.spacing.xs)));
+        facet::BeginStack("##conn-actions", {.orientation = facet::Orientation::Horizontal,
+                                             .align = facet::LayoutAlign::Center});
+        buttons();
+        facet::EndStack();
     }
-    ImGui::EndChild();
+    facet::EndCard();
 }
 
-void draw_inventory(Cs2ScreenState& s, float width) {
-    ImGui::BeginChild("##cs2_inv", ImVec2(width, 0.0F),
-                      ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_Borders);
-    ImGui::Text("Inventory (%zu)", s.snapshot.items.size());
-    ImGui::Separator();
-    if (s.snapshot.items.empty()) {
-        ImGui::TextDisabled("No storable items.");
-    } else {
-        draw_grid(
-            s.snapshot.items, s.inv_page, 5, 5,
-            [&](const cs2_gc::DisplayItem& it) { return s.selected_inv.count(it.id) != 0; },
-            [&](const cs2_gc::DisplayItem& it) {
-                if (s.selected_inv.count(it.id) != 0) s.selected_inv.erase(it.id);
-                else s.selected_inv.insert(it.id);
-            });
-        ImGui::Spacing();
-        const bool can_store = s.open_unit != 0;
-        char lbl[40];
-        std::snprintf(lbl, sizeof(lbl), "Store selected (%zu)", s.selected_inv.size());
-        ImGui::BeginDisabled(s.action_busy || s.selected_inv.empty() || !can_store);
-        if (ImGui::SmallButton(lbl) && s.client) {
-            s.action_busy = true;
-            s.error.clear();
-            s.client->move_in_many(
-                s.open_unit,
-                std::vector<std::uint64_t>(s.selected_inv.begin(), s.selected_inv.end()));
-            s.selected_inv.clear();
-            s.unit_loading = true;
-            s.contents_page = 0;
-            s.client->load_unit(s.open_unit);
-        }
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        ImGui::BeginDisabled(s.selected_inv.empty());
-        if (ImGui::SmallButton("Clear")) s.selected_inv.clear();
-        ImGui::EndDisabled();
-        if (!can_store) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("Open a storage unit first");
-        }
+// The empty state that replaces the tabs while the account cannot connect yet. Returns true
+// when something was drawn.
+bool draw_gate(app::AppState& state, core::Account& acct, Cs2ScreenState& s) {
+    const TokenState token = cs2::token_state(acct, now_seconds());
+    if (token == TokenState::Ready || s.phase != Cs2Phase::Idle) return false;
+
+    const char* title = "Set up the CS2 sign-in";
+    const char* message =
+        "CS2 needs its own sign-in for this account. The app signs in once with the stored password and "
+        "fills in the Steam Guard code from the authenticator.";
+    if (token == TokenState::Expired) {
+        title = "The CS2 sign-in has expired";
+        message = "Renew it once with the stored password. The Steam Guard code is filled in from the authenticator.";
+    } else if (token == TokenState::Revoked) {
+        title = "The CS2 sign-in no longer works";
+        message = "Steam stopped accepting it. Renew it once with the stored password.";
     }
-    ImGui::EndChild();
+    if (acct.password.empty() || token == TokenState::NoPassword) {
+        center_next(kBlockWidth);
+        if (kit::empty_state("CS2 sign-in needs the password",
+                             {.message = "This account has no stored password, so the app cannot sign it in to CS2. "
+                                         "Add the account again with a full login.",
+                              .icon = icons::token,
+                              .action_label = "Show on Accounts",
+                              .width = kBlockWidth}))
+            kit::open_account(state, acct.id);
+        return true;
+    }
+    const char* action = token == TokenState::NeedsSetup ? "Set up CS2 sign-in" : "Renew CS2 sign-in";
+    center_next(kBlockWidth);
+    if (s.acquiring) {
+        (void)kit::empty_state(title, {.message = "Signing in to Steam. This takes a few seconds.",
+                                       .icon = icons::token,
+                                       .width = kBlockWidth});
+        center_next(16.0F);
+        facet::Spinner("Signing in", {.tone = facet::Tone::Accent});
+    } else if (kit::empty_state(title, {.message = message,
+                                        .icon = icons::token,
+                                        .action_label = action,
+                                        .width = kBlockWidth})) {
+        cs2::start_signin(state, acct);
+    }
+    if (!s.signin_error.empty()) {
+        center_next(kBlockWidth);
+        (void)facet::InlineAlert("The sign-in did not work", nullptr,
+                                 "Check that the stored password and the authenticator still belong to this "
+                                 "account, then try again.",
+                                 {.tone = facet::Tone::Destructive, .width = kBlockWidth});
+        center_next(s.details_open ? kBlockWidth : 64.0F);
+        ImGui::BeginGroup();
+        if (facet::BeginDisclosure("Details###signin-details", &s.details_open, {.style = facet::DisclosureStyle::Link})) {
+            cs2::note_wrapped("%s", s.signin_error.c_str());
+            facet::EndDisclosure();
+        }
+        ImGui::EndGroup();
+    }
+    return true;
 }
 
-void draw_weekly_drop(Cs2ScreenState& s, float width) {
-    ImGui::BeginChild("##cs2_drop", ImVec2(width, 0.0F),
-                      ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_Borders);
-    ImGui::TextUnformatted("Weekly drop");
-    ImGui::Separator();
-
-    const cs2_gc::WeeklyReward& reward = s.snapshot.reward;
-    const float bar_w = ImGui::GetContentRegionAvail().x;
-    if (reward.available) {
-        ImGui::Text("Weekly drop ready: %u to claim", reward.redeemable_balance);
-        const std::size_t cap = reward.redeemable_balance;
-
-        const bool claim_all = reward.items.size() <= cap;
-        draw_grid(
-            reward.items, s.reward_page, 5, 1,
-            [&](const cs2_gc::DisplayItem& it) {
-                return !claim_all && s.selected_reward.count(it.id) != 0;
-            },
-            [&](const cs2_gc::DisplayItem& it) {
-                if (claim_all) return;
-                if (s.selected_reward.count(it.id) != 0) s.selected_reward.erase(it.id);
-                else if (s.selected_reward.size() < cap) s.selected_reward.insert(it.id);
-            });
-        ImGui::Spacing();
-        std::vector<std::uint64_t> ids;
-        if (claim_all) {
-            ids = reward.item_ids;
-            if (ids.size() > cap) ids.resize(cap);
-        } else {
-            ids.assign(s.selected_reward.begin(), s.selected_reward.end());
-        }
-        char lbl[40];
-        if (claim_all)
-            std::snprintf(lbl, sizeof(lbl), "Claim");
-        else
-            std::snprintf(lbl, sizeof(lbl), "Claim (%zu/%u)", s.selected_reward.size(),
-                          reward.redeemable_balance);
-        ImGui::BeginDisabled(s.action_busy || ids.empty());
-        if (ImGui::SmallButton(lbl)) {
-            s.action_busy = true;
-            s.error.clear();
-            s.selected_reward.clear();
-            s.client->claim_reward(std::move(ids));
-        }
-        ImGui::EndDisabled();
-    } else {
-
-        const bool claimed = drop_claimed_this_week(reward);
-        std::string names;
-        if (claimed)
-            for (const std::string& n : reward.claimed_names) {
-                if (n.empty()) continue;
-                if (!names.empty()) names += ", ";
-                names += n;
-            }
-        if (claimed)
-            ImGui::TextWrapped("Weekly drop claimed this week.");
-        else if (reward.loaded)
-            ImGui::TextWrapped("Rank up to unlock the weekly drop.");
-        else
-            ImGui::TextWrapped("No weekly drop to claim right now.");
-
-        const cs2_gc::PlayerProgress& prog = s.snapshot.progress;
-        if (prog.valid) {
-            const float frac = prog.xp_per_level > 0
-                                   ? static_cast<float>(prog.xp_in_level) / prog.xp_per_level
-                                   : 0.0F;
-            char overlay[48];
-            std::snprintf(overlay, sizeof(overlay), "Level %d  -  %d / %d XP", prog.level,
-                          prog.xp_in_level, prog.xp_per_level);
-            progress_bar_centered(frac, bar_w, overlay);
-        }
-
-        if (reward.loaded) {
-            if (claimed && !names.empty()) ImGui::TextDisabled("Picked: %s", names.c_str());
-            char when[32] = "";
-            const auto next = static_cast<std::time_t>(next_weekly_reset(now_seconds()));
-            std::tm tm{};
-            if (localtime_s(&tm, &next) == 0 && std::strftime(when, sizeof(when), "%b %d", &tm) > 0)
-                ImGui::TextDisabled("Resets around %s.", when);
-        }
+// Idle: what connecting does, in the empty state that holds the one Primary action. The
+// warning about this PC's Steam goes under it, so the heading never moves.
+void draw_not_connected(app::AppState& state, core::Account& acct) {
+    center_next(kBlockWidth);
+    if (kit::empty_state("Not connected to CS2",
+                         {.message = "Connecting signs this account in to CS2 from this app. If it is in a match "
+                                     "right now it leaves that match, and an account connected here before is "
+                                     "disconnected.",
+                          .icon = icons::crosshair,
+                          .action_label = "Connect to CS2",
+                          .width = kBlockWidth}))
+        cs2::connect(state, acct);
+    if (is_active_steam_user(acct)) {
+        center_next(kBlockWidth);
+        (void)facet::InlineAlert("Steam on this PC is signed in to this account", nullptr,
+                                 "If CS2 is running here, connecting ends that game.",
+                                 {.tone = facet::Tone::Warning, .width = kBlockWidth});
     }
-    ImGui::EndChild();
 }
 
-void draw_weekly_mission(Cs2ScreenState& s, float width) {
-    ImGui::BeginChild("##cs2_mission", ImVec2(width, 0.0F),
-                      ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_Borders);
-    ImGui::TextUnformatted("Weekly mission");
-    ImGui::Separator();
-    const cs2_gc::WeeklyMission& mission = s.snapshot.mission;
-    if (!mission.valid) {
-        ImGui::TextDisabled("No weekly mission right now.");
-    } else {
-        if (!mission.name.empty()) ImGui::TextWrapped("%s", mission.name.c_str());
-        const float bar_w = ImGui::GetContentRegionAvail().x;
-        if (mission.target > 0) {
-            const float frac =
-                static_cast<float>(mission.progress) / static_cast<float>(mission.target);
-            char overlay[48];
-            if (mission.xp > 0)
-                std::snprintf(overlay, sizeof(overlay), "%u / %u  -  %u XP", mission.progress,
-                              mission.target, mission.xp);
-            else
-                std::snprintf(overlay, sizeof(overlay), "%u / %u", mission.progress, mission.target);
-            progress_bar_centered(frac, bar_w, overlay);
-        } else {
-            ImGui::Text("Progress: %u", mission.progress);
+// Failed: one heading, one sentence, "Try again" as the Primary action; the client's own text
+// only behind Details.
+void draw_failed(app::AppState& state, core::Account& acct, Cs2ScreenState& s) {
+    const FailureText f = describe_failure(s.connection_error);
+    center_next(kBlockWidth);
+    if (kit::empty_state(f.title, {.message = f.hint,
+                                   .icon = facet::Icon("error"),
+                                   .action_label = "Try again",
+                                   .action_icon = facet::Icon("refresh"),
+                                   .tone = facet::Tone::Destructive,
+                                   .width = kBlockWidth}))
+        cs2::connect(state, acct);
+    if (f.token_problem && !acct.password.empty()) {
+        center_next(kBlockWidth);
+        facet::BeginStack("##renew", {.align = facet::LayoutAlign::Center, .width = kBlockWidth});
+        if (facet::Button("Renew CS2 sign-in", {.variant = facet::ButtonVariant::Plain, .loading = s.acquiring})) {
+            cs2::disconnect(s);
+            s.connection_error.clear();
+            cs2::start_signin(state, acct);
         }
-        ImGui::TextDisabled("Earned automatically by playing.");
+        facet::EndStack();
     }
-    ImGui::EndChild();
+    center_next(s.details_open ? kBlockWidth : 64.0F);
+    ImGui::BeginGroup();
+    if (facet::BeginDisclosure("Details###failure-details", &s.details_open, {.style = facet::DisclosureStyle::Link})) {
+        cs2::note_wrapped("%s", s.connection_error.c_str());
+        facet::EndDisclosure();
+    }
+    ImGui::EndGroup();
+}
+
+struct TabDef {
+    int id;
+    const char* label;
+};
+
+// Tabs in the order of how often each is the reason for a visit: the weekly state first, then
+// the inventory, then the storage units. Only the tabs the settings enable are shown.
+void draw_tabs(app::AppState& state, core::Account& acct, Cs2ScreenState& s) {
+    const auto& gc = state.settings.cs2_gc;
+    TabDef defs[3];
+    facet::ChoiceItem tabs[3];
+    int n = 0;
+    defs[n++] = {0, "Overview"};
+    if (gc.show_inventory) defs[n++] = {1, "Inventory"};
+    if (gc.show_storage_units) defs[n++] = {2, "Storage units"};
+    for (int i = 0; i < n; ++i) tabs[i] = {.label = defs[i].label};
+    int current = 0;
+    for (int i = 0; i < n; ++i)
+        if (defs[i].id == s.tab) current = i;
+    (void)facet::TabBar("##cs2-tabs", &current, std::span<const facet::ChoiceItem>(tabs, static_cast<std::size_t>(n)));
+    s.tab = defs[current].id;
+    ImGui::Dummy(ImVec2(0.0F, facet::Px(facet::T().spacing.sm)));
+
+    switch (s.tab) {
+        case 1: cs2::draw_inventory(state, acct, s); break;
+        case 2: cs2::draw_storage(state, acct, s); break;
+        default: cs2::draw_overview(state, acct, s); break;
+    }
+}
+
+// Transient state of the screen: the Details disclosures and the alerts. Selections and
+// filters belong to the account's view model, which is dropped on lock (clear_session_secrets)
+// and on an account switch.
+void reset_cs2_transient(app::AppState& state) {
+    if (!state.cs2_screen) return;
+    Cs2ScreenState& s = *state.cs2_screen;
+    s.details_open = false;
+    s.action_alert_open = true;
+    s.action_error.clear();
 }
 
 }  // namespace
 
 void discard_cs2_client(app::AppState& state) {
-    if (state.cs2_screen) discard_client(*state.cs2_screen);
+    if (state.cs2_screen) cs2::retire_client(*state.cs2_screen);
     state.cs2_screen.reset();
 }
 
+// One account at a time: the connection card on top holds the account choice and the session
+// state, because every tab depends on both; the tabs below hold the data of the live session.
 void draw_cs2(app::AppState& state) {
-    static char picker_search[64] = "";
-
-    ImGui::TextUnformatted("Account");
-    core::Account* picked = state.selected_account_id.empty()
-                                ? nullptr
-                                : state.find_account(state.selected_account_id);
-    if (draw_cs2_account_chip(state, picked)) {
-        picker_search[0] = '\0';
-        ImGui::OpenPopup("##cs2_account_picker");
-    }
-    if (begin_styled_popup("##cs2_account_picker")) {
-        draw_cs2_account_picker(state, picker_search);
-        end_styled_popup();
-    }
-    ImGui::Spacing();
-
-    ImGui::TextUnformatted("Connection");
-    separator();
-
-    if (state.selected_account_id.empty()) {
-        if (state.cs2_screen) discard_client(*state.cs2_screen);
-        state.cs2_screen.reset();
-        ImGui::TextDisabled("Pick an account above to manage its CS2 inventory.");
-        return;
-    }
-    core::Account* acct = state.find_account(state.selected_account_id);
-    if (acct == nullptr || acct->steam_id_64 == 0) {
-        if (state.cs2_screen) discard_client(*state.cs2_screen);
-        state.cs2_screen.reset();
-        ImGui::TextDisabled("This account has no resolved Steam ID yet. Refresh it first.");
-        return;
+    kit::PageScope page("cs2", {.scroll = false});
+    {
+        kit::PageHeaderScope header("CS2", {.context = "Weekly drop, inventory and storage units of one account"});
     }
 
-    if (!state.cs2_screen || state.cs2_screen->account_id != acct->id) {
-        if (state.cs2_screen) discard_client(*state.cs2_screen);
+    core::Account* acct =
+        state.selected_account_id.empty() ? nullptr : state.find_account(state.selected_account_id);
+    if (acct != nullptr && acct->steam_id_64 != 0 &&
+        (!state.cs2_screen || state.cs2_screen->account_id != acct->id)) {
+        discard_cs2_client(state);
         state.cs2_screen = std::make_unique<Cs2ScreenState>();
         state.cs2_screen->account_id = acct->id;
     }
-    Cs2ScreenState& s = *state.cs2_screen;
+    Cs2ScreenState* sp = acct != nullptr && acct->steam_id_64 != 0 ? state.cs2_screen.get() : nullptr;
 
-    if (app::cs2_client_token(*acct).empty()) {
-        if (acct->password.empty()) {
-            ImGui::TextWrapped("This account needs a one-time CS2 client sign-in, but no password is "
-                               "stored. Add it through Full Login first.");
-            return;
-        }
-        ImGui::TextWrapped("This account uses a mobile-scoped token, which Steam does not accept for "
-                           "the CS2 Game Coordinator. A one-time client sign-in is needed; Steam Guard "
-                           "is filled automatically from the in-app authenticator.");
-        ImGui::Spacing();
-        ImGui::BeginDisabled(s.acquiring);
-        if (ImGui::Button("Set up CS2 sign-in")) {
-            s.acquiring = true;
-            s.error.clear();
-            app::AppState* st = &state;
-            const std::string aid = acct->id;
-            state.acquire_cm_token(aid, [st, aid](bool ok, std::string err) {
-                if (!st->cs2_screen || st->cs2_screen->account_id != aid) return;
-                st->cs2_screen->acquiring = false;
-                if (!ok) st->cs2_screen->error = std::move(err);
-            });
-        }
-        ImGui::EndDisabled();
-        if (s.acquiring) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("Signing in...");
-        }
-        if (!s.error.empty()) {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0F, 0.45F, 0.45F, 1.0F));
-            ImGui::TextWrapped("%s", s.error.c_str());
-            ImGui::PopStyleColor();
-        }
+    connection_card(state, acct, sp);
+    // The picker may have chosen another account this frame; the body follows next frame.
+    if (acct != nullptr && acct->id != state.selected_account_id) return;
+    ImGui::Dummy(ImVec2(0.0F, facet::Px(facet::T().spacing.md)));
+
+    if (acct == nullptr) {
+        discard_cs2_client(state);
+        center_next(kBlockWidth);
+        (void)kit::empty_state("Choose an account",
+                               {.message = "Pick an account in the card above to see its weekly drop and mission, "
+                                           "its inventory and its storage units.",
+                                .icon = icons::crosshair,
+                                .width = kBlockWidth});
+        return;
+    }
+    if (acct->steam_id_64 == 0) {
+        discard_cs2_client(state);
+        center_next(kBlockWidth);
+        if (kit::empty_state("This account has no Steam ID yet",
+                             {.message = "Refresh it on the Accounts screen so the app learns its Steam ID, then come "
+                                         "back to connect.",
+                              .icon = icons::crosshair,
+                              .action_label = "Show on Accounts",
+                              .width = kBlockWidth}))
+            kit::open_account(state, acct->id);
         return;
     }
 
-    if (!s.client) {
-        if (ImGui::Button("Connect to CS2")) start_client(state, *acct);
-        if (!s.status.empty()) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("%s", s.status.c_str());
-        }
-        ImGui::Spacing();
-        ImGui::PushStyleColor(ImGuiCol_Text, theme::warning());
-        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x -
-                               kContentPaddingX);
-        ImGui::TextWrapped("Connecting takes over this account's CS2 session and disconnects any "
-                           "other connected account. If it is in a match it will be kicked, so "
-                           "avoid connecting while it is playing.");
-        ImGui::PopTextWrapPos();
-        ImGui::PopStyleColor();
-        return;
+    Cs2ScreenState& s = *sp;
+    cs2::pump(state, s);
+    if (draw_gate(state, *acct, s)) return;
+    switch (s.phase) {
+        case Cs2Phase::Idle: draw_not_connected(state, *acct); return;
+        case Cs2Phase::Failed: draw_failed(state, *acct, s); return;
+        case Cs2Phase::Connecting: draw_tabs(state, *acct, s); return;
+        case Cs2Phase::Connected: draw_tabs(state, *acct, s); return;
     }
-
-    ImGui::TextUnformatted(s.status.c_str());
-    ImGui::SameLine();
-    if (s.connected) {
-
-        if (ImGui::SmallButton("Refresh") && s.client) s.client->refresh();
-        ImGui::SameLine();
-    }
-    if (ImGui::SmallButton("Disconnect")) {
-        discard_client(s);
-        s.connected = false;
-        s.status = "Disconnected";
-        return;
-    }
-
-    if (!s.error.empty()) {
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0F, 0.45F, 0.45F, 1.0F));
-        ImGui::TextWrapped("%s", s.error.c_str());
-        ImGui::PopStyleColor();
-    }
-
-    if (!s.connected) {
-        ImGui::TextDisabled("Working...");
-        return;
-    }
-
-    ImGui::Spacing();
-
-    const float gap = ImGui::GetStyle().ItemSpacing.x;
-    const float avail = ImGui::GetContentRegionAvail().x - kContentPaddingX;
-    const float col = (avail - gap) * 0.5F;
-
-    const auto& gc = state.settings.cs2_gc;
-    std::vector<std::function<void(float)>> cards;
-    if (gc.show_weekly_drop)    cards.push_back([&](float w) { draw_weekly_drop(s, w); });
-    if (gc.show_weekly_mission) cards.push_back([&](float w) { draw_weekly_mission(s, w); });
-    if (gc.show_storage_units)  cards.push_back([&](float w) { draw_units(s, w); });
-    if (gc.show_inventory)      cards.push_back([&](float w) { draw_inventory(s, w); });
-
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(gap, 8.0F));
-    for (std::size_t i = 0; i < cards.size(); i += 2) {
-        if (i > 0) ImGui::Spacing();
-        cards[i](col);
-        if (i + 1 < cards.size()) {
-            ImGui::SameLine();
-            cards[i + 1](col);
-        }
-    }
-    ImGui::PopStyleVar();
 }
 
 }  // namespace sam::ui::screens
+
+SAM_KIT_TRANSIENT_RESET(cs2_screen, &sam::ui::screens::reset_cs2_transient)
+SAM_KIT_SCREEN_LEAVE(cs2_screen, sam::app::Screen::Cs2, &sam::ui::screens::reset_cs2_transient)

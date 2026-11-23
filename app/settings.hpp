@@ -7,7 +7,7 @@
 namespace sam::app {
 
 enum class AccountsViewMode : std::uint8_t {
-    Grid = 0,
+    Table = 0,  // 0 is what settings saved by 1.x hold for their grid layout; keep the values
     List = 1,
 };
 
@@ -50,6 +50,18 @@ enum class CleanerProfile : std::uint8_t {
     FullWipe = 2,      // + every non-preserved account's userdata folder
 };
 
+// Which Facet theme preset the UI shows. System follows the Windows app mode and keeps
+// following it while the app runs. Values are persisted; never reorder them.
+enum class ThemeMode : std::uint8_t {
+    System = 0,
+    Light = 1,
+    Dark = 2,
+};
+
+// Range of Settings::ui_scale. Facet multiplies it with the monitor DPI scale.
+inline constexpr float kUiScaleMin = 0.75F;
+inline constexpr float kUiScaleMax = 2.0F;
+
 // A saved destination trade link. Name is an optional user label; empty shows the URL.
 struct SavedTradeLink {
     std::string url;
@@ -63,7 +75,7 @@ struct SavedTradeLink {
 struct Settings {
     int clipboard_clear_seconds = 12;
     int auto_lock_minutes = 15;
-    AccountsViewMode accounts_view = AccountsViewMode::Grid;
+    AccountsViewMode accounts_view = AccountsViewMode::List;
     bool show_avatars = true;
     bool hide_notes = false;
     bool refresh_on_launch = false;
@@ -145,6 +157,15 @@ struct Settings {
     // version_check_skip_until holds the tag the user chose to skip.
     bool check_updates_on_launch = true;
     std::string version_check_skip_until;
+
+    // GLOBAL appearance: applied before the first frame, so the picker and the unlock
+    // screen already show it. Pushed into Facet by ui::theme::apply_appearance.
+    // Dark by default: the app has always been dark, and its users are a gaming audience.
+    ThemeMode theme_mode = ThemeMode::Dark;
+    // "#RRGGBB", or empty for Facet's default blue (each theme preset shows its own shade).
+    std::string ui_accent;
+    // The user's UI scale on top of the monitor DPI, clamped to kUiScaleMin..kUiScaleMax.
+    float ui_scale = 1.0F;
 
     struct InfoToggles {
         bool show_vac = true;

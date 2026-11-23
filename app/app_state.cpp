@@ -219,7 +219,7 @@ void AppState::start_update_check() {
             return;
         }
         auto r = core::update_check::fetch_latest_release(
-            "luminary-cloud/steam-account-manager", sam::kVersion);
+            "velyndev/steam-account-manager", sam::kVersion);
         if (!r || !r->newer_than_current || st.stop_requested()) {
             return;
         }
@@ -289,6 +289,10 @@ void AppState::save_global_settings() {
     j["start_with_windows"]      = (settings.logon_action == LogonAction::BackgroundRefresh);
     j["check_updates_on_launch"]  = settings.check_updates_on_launch;
     j["version_check_skip_until"] = settings.version_check_skip_until;
+
+    j["theme_mode"] = static_cast<int>(settings.theme_mode);
+    j["ui_accent"]  = settings.ui_accent;
+    j["ui_scale"]   = settings.ui_scale;
 
     j["streamproof_hint"]  = settings.streamproof;
     j["proxy_mode_hint"]   = static_cast<int>(settings.proxy_mode);
@@ -472,6 +476,17 @@ void AppState::load_settings() {
     get("check_updates_on_launch",  settings.check_updates_on_launch);
     get("version_check_skip_until", settings.version_check_skip_until);
 
+    if (j.contains("theme_mode") && j["theme_mode"].is_number_integer()) {
+        const int v = j["theme_mode"].get<int>();
+        settings.theme_mode = (v >= 0 && v <= 2) ? static_cast<ThemeMode>(v) : ThemeMode::Dark;
+    }
+    if (j.contains("ui_accent") && j["ui_accent"].is_string()) {
+        settings.ui_accent = j["ui_accent"].get<std::string>();
+    }
+    if (j.contains("ui_scale") && j["ui_scale"].is_number()) {
+        settings.ui_scale = std::clamp(j["ui_scale"].get<float>(), kUiScaleMin, kUiScaleMax);
+    }
+
     get("streamproof",      settings.streamproof);
     get("streamproof_hint", settings.streamproof);
     get("single_proxy",      settings.single_proxy);
@@ -507,7 +522,7 @@ void AppState::load_vault_settings() {
     get("auto_lock_minutes",       settings.auto_lock_minutes);
     if (j.contains("accounts_view")) {
         const int v = j["accounts_view"].get<int>();
-        settings.accounts_view = (v == 1) ? AccountsViewMode::List : AccountsViewMode::Grid;
+        settings.accounts_view = (v == 1) ? AccountsViewMode::List : AccountsViewMode::Table;
     }
     get("show_avatars",            settings.show_avatars);
     get("hide_notes",              settings.hide_notes);

@@ -3,75 +3,95 @@
 #include <windows.h>
 
 #include <d3d11.h>
-#include <wincodec.h>
-#include <wrl/client.h>
 
 #include <spdlog/spdlog.h>
 
 #include <cstddef>
+#include <iterator>
 #include <vector>
 
 #include "app/resource.h"
 
 namespace sam::ui::icons {
 
-extern const unsigned char* const kGithubIconPng;
-extern const std::size_t kGithubIconPngLen;
-
 namespace {
 
-using Microsoft::WRL::ComPtr;
+// The app's glyphs. Grid and stroke follow Facet's built-in set (docs/images-and-icons.md):
+// 16 x 16 view box, stroke 1.5 in currentColor with round caps and joins, every coordinate
+// between 1.75 and 14.25, fill only for dots. Original drawings, no brand marks.
+#define SAM_GLYPH_OPEN                                                                            \
+    "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" " \
+    "fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" "       \
+    "stroke-linejoin=\"round\">"
+#define SAM_GLYPH_CLOSE "</svg>"
 
-ID3D11ShaderResourceView* g_github_srv = nullptr;
-ID3D11Texture2D* g_github_tex = nullptr;
-ID3D11ShaderResourceView* g_app_srv = nullptr;
-ID3D11Texture2D* g_app_tex = nullptr;
+struct GlyphSource {
+    GlyphInfo info;
+    const char* svg;
+};
 
-bool decode_png(const unsigned char* data, std::size_t len, std::vector<unsigned char>& rgba_out,
-                UINT& w_out, UINT& h_out) {
-    ComPtr<IWICImagingFactory> factory;
-    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
-                                  IID_PPV_ARGS(&factory));
-    if (FAILED(hr)) {
-        spdlog::warn("icons: WIC factory creation failed: 0x{:08x}", static_cast<unsigned>(hr));
-        return false;
-    }
+const GlyphSource kGlyphs[] = {
+    // Shield with a solid keyhole (a filled head and a tapered slot, so at 16 units it reads as
+    // a lock, not as a map pin).
+    {{"sam-authenticator", authenticator},
+     SAM_GLYPH_OPEN
+     "<path d=\"M8 1.75L13.25 3.5V7.75C13.25 10.9 11.1 13.2 8 14.25C4.9 13.2 2.75 10.9 2.75 7.75V3.5z\"/>"
+     "<circle cx=\"8\" cy=\"6.6\" r=\"1.45\" fill=\"currentColor\" stroke=\"none\"/>"
+     "<path d=\"M7.3 7.3h1.4l.45 3.2h-2.3z\" fill=\"currentColor\" stroke=\"none\"/>" SAM_GLYPH_CLOSE},
+    // Phone with a check on its screen.
+    {{"sam-confirmations", confirmations},
+     SAM_GLYPH_OPEN "<rect x=\"4\" y=\"1.75\" width=\"8\" height=\"12.5\" rx=\"1.75\"/>"
+     "<path d=\"M6.25 8.25l1.25 1.25 2.25-2.5\"/>" SAM_GLYPH_CLOSE},
+    // Two opposed arrows.
+    {{"sam-trade", trade},
+     SAM_GLYPH_OPEN "<path d=\"M2.75 5.25h10M10.25 2.75l2.5 2.5-2.5 2.5\"/>"
+     "<path d=\"M13.25 10.75h-10M5.75 8.25l-2.5 2.5 2.5 2.5\"/>" SAM_GLYPH_CLOSE},
+    // Ring with four ticks and a center dot.
+    {{"sam-crosshair", crosshair},
+     SAM_GLYPH_OPEN "<circle cx=\"8\" cy=\"8\" r=\"5\"/>"
+     "<path d=\"M8 1.75v3M8 11.25v3M1.75 8h3M11.25 8h3\"/>"
+     "<circle cx=\"8\" cy=\"8\" r=\"1\" fill=\"currentColor\" stroke=\"none\"/>" SAM_GLYPH_CLOSE},
+    // Key with two teeth.
+    {{"sam-token", token},
+     SAM_GLYPH_OPEN "<circle cx=\"5.25\" cy=\"10.75\" r=\"2.75\"/>"
+     "<path d=\"M7.25 8.75l6-6M11.25 4.75l1.5 1.5M9.5 6.5l1.25 1.25\"/>" SAM_GLYPH_CLOSE},
+    // Safe with a dial and two feet.
+    {{"sam-vault", vault},
+     SAM_GLYPH_OPEN "<rect x=\"2.25\" y=\"2.25\" width=\"11.5\" height=\"10\" rx=\"1.5\"/>"
+     "<circle cx=\"8\" cy=\"7.25\" r=\"2.25\"/><path d=\"M4.75 12.25V14M11.25 12.25V14\"/>" SAM_GLYPH_CLOSE},
+    // Circle with a slash.
+    {{"sam-ban", ban},
+     SAM_GLYPH_OPEN "<circle cx=\"8\" cy=\"8\" r=\"6\"/><path d=\"M3.75 12.25l8.5-8.5\"/>" SAM_GLYPH_CLOSE},
+    // Two people, one in front of the other.
+    {{"sam-group", group},
+     SAM_GLYPH_OPEN "<circle cx=\"6\" cy=\"5.25\" r=\"2.5\"/><path d=\"M1.75 13.75a4.25 4.25 0 0 1 8.5 0\"/>"
+     "<path d=\"M10.25 2.95a2 2 0 1 1 0 3.6M11.75 9.1a3.5 3.5 0 0 1 2.5 3.4\"/>" SAM_GLYPH_CLOSE},
+    // A table: a frame with a header rule, a column rule and a row rule.
+    {{"sam-table", table},
+     SAM_GLYPH_OPEN "<rect x=\"2.25\" y=\"2.75\" width=\"11.5\" height=\"10.5\" rx=\"1.5\"/>"
+     "<path d=\"M2.25 6.25h11.5M2.25 9.75h11.5M6.5 6.25v7\"/>" SAM_GLYPH_CLOSE},
+    // Gift box with a bow.
+    {{"sam-weekly-drop", weekly_drop},
+     SAM_GLYPH_OPEN "<rect x=\"2.25\" y=\"5.25\" width=\"11.5\" height=\"3\" rx=\"0.75\"/>"
+     "<path d=\"M3.25 8.25v5.5h9.5v-5.5M8 5.25v8.5\"/>"
+     "<path d=\"M8 5.25C7 3 4.75 2.75 5 4.25 5.15 5 6.5 5.25 8 5.25 9.5 5.25 10.85 5 11 4.25 "
+     "11.25 2.75 9 3 8 5.25z\"/>" SAM_GLYPH_CLOSE},
+};
 
-    ComPtr<IWICStream> stream;
-    hr = factory->CreateStream(&stream);
-    if (FAILED(hr)) return false;
-    hr = stream->InitializeFromMemory(const_cast<BYTE*>(data), static_cast<DWORD>(len));
-    if (FAILED(hr)) return false;
+#undef SAM_GLYPH_OPEN
+#undef SAM_GLYPH_CLOSE
 
-    ComPtr<IWICBitmapDecoder> decoder;
-    hr = factory->CreateDecoderFromStream(stream.Get(), nullptr, WICDecodeMetadataCacheOnLoad,
-                                          &decoder);
-    if (FAILED(hr)) return false;
+GlyphInfo g_glyph_infos[std::size(kGlyphs)] = {};
 
-    ComPtr<IWICBitmapFrameDecode> frame;
-    hr = decoder->GetFrame(0, &frame);
-    if (FAILED(hr)) return false;
+// The app icon at the sizes its ICO carries, so it is drawn from a texture at least as large as
+// the target (no mipmaps: a texture shrunk far below its size would alias).
+constexpr int kAppIconSizes[] = {32, 64, 128, 256};
+ID3D11ShaderResourceView* g_app_srv[std::size(kAppIconSizes)] = {};
+ID3D11Texture2D* g_app_tex[std::size(kAppIconSizes)] = {};
 
-    ComPtr<IWICFormatConverter> conv;
-    hr = factory->CreateFormatConverter(&conv);
-    if (FAILED(hr)) return false;
-    hr = conv->Initialize(frame.Get(), GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone,
-                          nullptr, 0.0, WICBitmapPaletteTypeCustom);
-    if (FAILED(hr)) return false;
-
-    UINT w = 0, h = 0;
-    conv->GetSize(&w, &h);
-    rgba_out.resize(static_cast<std::size_t>(w) * h * 4);
-    hr = conv->CopyPixels(nullptr, w * 4, static_cast<UINT>(rgba_out.size()), rgba_out.data());
-    if (FAILED(hr)) return false;
-    w_out = w;
-    h_out = h;
-    return true;
-}
-
-bool load_app_icon_rgba(std::vector<unsigned char>& rgba_out, UINT& w_out, UINT& h_out) {
+bool load_app_icon_rgba(int size, std::vector<unsigned char>& rgba_out, UINT& w_out, UINT& h_out) {
     HICON icon = static_cast<HICON>(LoadImageW(GetModuleHandleW(nullptr),
-        MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR));
+        MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, size, size, LR_DEFAULTCOLOR));
     if (icon == nullptr) return false;
 
     ICONINFO info{};
@@ -153,54 +173,57 @@ ID3D11ShaderResourceView* create_texture(ID3D11Device* device,
 
 }  // namespace
 
+void register_glyphs() {
+    for (std::size_t i = 0; i < std::size(kGlyphs); ++i) {
+        const GlyphSource& g = kGlyphs[i];
+        if (facet::FindIcon(g.info.name).IsValid()) continue;
+        if (facet::RegisterIcon(g.info.name, g.svg) != g.info.icon) {
+            spdlog::warn("icons: glyph {} did not register", g.info.name);
+        }
+    }
+}
+
+const GlyphInfo* glyphs(int* count) {
+    for (std::size_t i = 0; i < std::size(kGlyphs); ++i) g_glyph_infos[i] = kGlyphs[i].info;
+    if (count != nullptr) *count = static_cast<int>(std::size(kGlyphs));
+    return g_glyph_infos;
+}
+
 void load(ID3D11Device* device) {
+    register_glyphs();
     if (device == nullptr) {
         return;
     }
-
-    if (kGithubIconPngLen != 0) {
-        const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-        const bool co_owned = SUCCEEDED(co);
+    for (std::size_t i = 0; i < std::size(kAppIconSizes); ++i) {
         std::vector<unsigned char> rgba;
         UINT w = 0, h = 0;
-        const bool ok = decode_png(kGithubIconPng, kGithubIconPngLen, rgba, w, h);
-        if (co_owned) {
-            CoUninitialize();
-        }
-        if (ok) {
-            g_github_srv = create_texture(device, rgba, w, h, &g_github_tex);
-        }
-    }
-
-    {
-        std::vector<unsigned char> rgba;
-        UINT w = 0, h = 0;
-        if (load_app_icon_rgba(rgba, w, h)) {
-            g_app_srv = create_texture(device, rgba, w, h, &g_app_tex);
+        if (load_app_icon_rgba(kAppIconSizes[i], rgba, w, h)) {
+            g_app_srv[i] = create_texture(device, rgba, w, h, &g_app_tex[i]);
         }
     }
 }
 
 void shutdown() {
-    if (g_github_srv) {
-        g_github_srv->Release();
-        g_github_srv = nullptr;
-    }
-    if (g_github_tex) {
-        g_github_tex->Release();
-        g_github_tex = nullptr;
-    }
-    if (g_app_srv) {
-        g_app_srv->Release();
-        g_app_srv = nullptr;
-    }
-    if (g_app_tex) {
-        g_app_tex->Release();
-        g_app_tex = nullptr;
+    for (std::size_t i = 0; i < std::size(kAppIconSizes); ++i) {
+        if (g_app_srv[i]) {
+            g_app_srv[i]->Release();
+            g_app_srv[i] = nullptr;
+        }
+        if (g_app_tex[i]) {
+            g_app_tex[i]->Release();
+            g_app_tex[i] = nullptr;
+        }
     }
 }
 
-ImTextureID github() { return reinterpret_cast<ImTextureID>(g_github_srv); }
-ImTextureID app_icon() { return reinterpret_cast<ImTextureID>(g_app_srv); }
+ImTextureID app_icon_for(float pixels) {
+    ID3D11ShaderResourceView* best = nullptr;
+    for (std::size_t i = 0; i < std::size(kAppIconSizes); ++i) {
+        if (g_app_srv[i] == nullptr) continue;
+        best = g_app_srv[i];
+        if (static_cast<float>(kAppIconSizes[i]) >= pixels) break;
+    }
+    return reinterpret_cast<ImTextureID>(best);
+}
 
 }  // namespace sam::ui::icons

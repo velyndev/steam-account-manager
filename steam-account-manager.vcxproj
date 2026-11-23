@@ -48,6 +48,16 @@
     <LinkIncremental Condition="'$(Configuration)'=='Debug'">true</LinkIncremental>
     <LinkIncremental Condition="'$(Configuration)'=='Release'">false</LinkIncremental>
   </PropertyGroup>
+  <PropertyGroup Label="Facet">
+    <!-- Facet and its libraries, built by scripts\build_facet.ps1 (target BuildFacet below)
+         per toolset and configuration. -->
+    <SamFacetBuildDir>$(ProjectDir)third_party\facet-build\$(PlatformToolset)\</SamFacetBuildDir>
+    <SamFacetLibDir>$(SamFacetBuildDir)lib\$(Configuration)\</SamFacetLibDir>
+    <SamFacetStamp>$(SamFacetBuildDir)$(Configuration).stamp</SamFacetStamp>
+    <!-- The tracked libprotobuf.lib is Release /MT only; Debug links the /MTd build. -->
+    <SamProtobufLib Condition="'$(Configuration)'=='Debug'">$(SamFacetLibDir)libprotobufd.lib</SamProtobufLib>
+    <SamProtobufLib Condition="'$(Configuration)'!='Debug'">$(ProjectDir)third_party\protobuf\lib\libprotobuf.lib</SamProtobufLib>
+  </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
       <LanguageStandard>stdcpp20</LanguageStandard>
@@ -65,6 +75,10 @@
         $(ProjectDir)core\steam_auth\gen;
         $(ProjectDir)third_party\imgui;
         $(ProjectDir)third_party\imgui\backends;
+        $(ProjectDir)third_party\imgui\misc\freetype;
+        $(ProjectDir)third_party\facet\include;
+        $(SamFacetBuildDir)freetype\include;
+        $(ProjectDir)third_party\freetype\include;
         $(ProjectDir)third_party\nlohmann_json\single_include;
         $(ProjectDir)third_party\spdlog\include;
         $(ProjectDir)third_party\mbedtls\include;
@@ -83,6 +97,7 @@
         IMGUI_DEFINE_MATH_OPERATORS;
         IMGUI_DISABLE_OBSOLETE_FUNCTIONS;IMGUI_DISABLE_OBSOLETE_KEYIO;
         IMGUI_USE_WCHAR32;
+        IMGUI_ENABLE_FREETYPE;
         %(PreprocessorDefinitions)
       </PreprocessorDefinitions>
     </ClCompile>
@@ -99,7 +114,11 @@
         UxTheme.lib;version.lib;
         Winhttp.lib;
         UIAutomationCore.lib;
-        $(ProjectDir)third_party\protobuf\lib\libprotobuf.lib;
+        $(SamProtobufLib);
+        $(SamFacetLibDir)facet.lib;
+        $(SamFacetLibDir)lunasvg.lib;
+        $(SamFacetLibDir)plutovg.lib;
+        $(SamFacetLibDir)freetype.lib;
         %(AdditionalDependencies)
       </AdditionalDependencies>
     </Link>
@@ -114,7 +133,9 @@
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
-      <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <!-- SAM_UI_CAPTURE compiles the dev-only offscreen screenshot mode (app\ui_capture.cpp,
+           the ui-capture command line switch). Debug only; never in a release build. -->
+      <PreprocessorDefinitions>_DEBUG;SAM_UI_CAPTURE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
@@ -155,6 +176,9 @@
     <ClCompile Include="app\job_pump.cpp" />
     <ClCompile Include="app\conf_poller.cpp" />
     <ClCompile Include="app\cleaner_runner.cpp" />
+    <ClCompile Include="app\ui_capture.cpp" />
+    <ClCompile Include="app\ui_capture_demo.cpp" />
+    <ClCompile Include="app\ui_capture_scenes.cpp" />
     <ClCompile Include="core\time_aligner.cpp" />
     <ClCompile Include="core\log.cpp" />
     <ClCompile Include="core\update_check.cpp" />
@@ -252,52 +276,97 @@
     <ClCompile Include="platform\tray_icon.cpp" />
     <ClCompile Include="platform\startup_task.cpp" />
     <ClCompile Include="platform\window_affinity.cpp" />
-    <ClCompile Include="ui\main_window.cpp" />
-    <ClCompile Include="ui\theme.cpp" />
     <ClCompile Include="ui\fonts.cpp" />
     <ClCompile Include="ui\icons.cpp" />
-    <ClCompile Include="ui\icons_data.cpp" />
+    <ClCompile Include="ui\main_window.cpp" />
     <ClCompile Include="ui\stb_impl.cpp" />
+    <ClCompile Include="ui\theme.cpp" />
     <ClCompile Include="ui\util.cpp" />
-    <ClCompile Include="ui\screens\unlock_screen.cpp" />
-    <ClCompile Include="ui\screens\vault_picker_screen.cpp" />
+    <ClCompile Include="ui\kit\account.cpp" />
+    <ClCompile Include="ui\kit\actions.cpp" />
+    <ClCompile Include="ui\kit\feedback.cpp" />
+    <ClCompile Include="ui\kit\format.cpp" />
+    <ClCompile Include="ui\kit\layout.cpp" />
+    <ClCompile Include="ui\kit\navigation.cpp" />
+    <ClCompile Include="ui\kit\page.cpp" />
+    <ClCompile Include="ui\kit\row_line.cpp" />
+    <ClCompile Include="ui\kit\secrets.cpp" />
+    <ClCompile Include="ui\kit\standing.cpp" />
+    <ClCompile Include="ui\kit\transient.cpp" />
+    <ClCompile Include="ui\shell\activity.cpp" />
+    <ClCompile Include="ui\shell\capture_kit.cpp" />
+    <ClCompile Include="ui\shell\capture_scenes.cpp" />
+    <ClCompile Include="ui\shell\command_palette.cpp" />
+    <ClCompile Include="ui\shell\overlays.cpp" />
+    <ClCompile Include="ui\shell\shell.cpp" />
+    <ClCompile Include="ui\shell\sidebar.cpp" />
+    <ClCompile Include="ui\shell\title_bar.cpp" />
     <ClCompile Include="ui\screens\accounts_screen.cpp" />
-    <ClCompile Include="ui\screens\accounts_list_view.cpp" />
-    <ClCompile Include="ui\screens\sda_screen.cpp" />
-    <ClCompile Include="ui\screens\add_account_screen.cpp" />
-    <ClCompile Include="ui\screens\add_account_full_login.cpp" />
     <ClCompile Include="ui\screens\add_account_cached.cpp" />
+    <ClCompile Include="ui\screens\add_account_full_login.cpp" />
     <ClCompile Include="ui\screens\add_account_imports.cpp" />
-    <ClCompile Include="ui\screens\confirmations_screen.cpp" />
+    <ClCompile Include="ui\screens\add_account_screen.cpp" />
     <ClCompile Include="ui\screens\confirmations_modals.cpp" />
+    <ClCompile Include="ui\screens\confirmations_screen.cpp" />
+    <ClCompile Include="ui\screens\cs2_screen.cpp" />
+    <ClCompile Include="ui\screens\sda_screen.cpp" />
     <ClCompile Include="ui\screens\settings_screen.cpp" />
     <ClCompile Include="ui\screens\settings_sections.cpp" />
-    <ClCompile Include="ui\screens\settings_cleaner.cpp" />
-    <ClCompile Include="ui\screens\trade_offers_screen.cpp" />
-    <ClCompile Include="ui\screens\cs2_screen.cpp" />
     <ClCompile Include="ui\screens\trade_offers_modals.cpp" />
-    <ClCompile Include="ui\widgets\rail_nav.cpp" />
-    <ClCompile Include="ui\widgets\title_bar.cpp" />
-    <ClCompile Include="ui\widgets\account_card.cpp" />
-    <ClCompile Include="ui\widgets\account_context_menu.cpp" />
-    <ClCompile Include="ui\widgets\account_panel.cpp" />
-    <ClCompile Include="ui\widgets\avatar.cpp" />
-    <ClCompile Include="ui\widgets\login_method_control.cpp" />
-    <ClCompile Include="ui\widgets\tag_chip.cpp" />
-    <ClCompile Include="ui\widgets\trust_badge.cpp" />
-    <ClCompile Include="ui\widgets\code_display.cpp" />
-    <ClCompile Include="ui\widgets\search_bar.cpp" />
-    <ClCompile Include="ui\widgets\ban_pills.cpp" />
-    <ClCompile Include="ui\widgets\master_pw_field.cpp" />
-    <ClCompile Include="ui\widgets\redacted_text.cpp" />
+    <ClCompile Include="ui\screens\trade_offers_screen.cpp" />
+    <ClCompile Include="ui\screens\unlock_screen.cpp" />
+    <ClCompile Include="ui\screens\vault_picker_screen.cpp" />
+    <ClCompile Include="ui\screens\accounts\account_actions.cpp" />
+    <ClCompile Include="ui\screens\accounts\account_detail.cpp" />
+    <ClCompile Include="ui\screens\accounts\account_list.cpp" />
+    <ClCompile Include="ui\screens\accounts\account_menus.cpp" />
+    <ClCompile Include="ui\screens\accounts\account_table.cpp" />
+    <ClCompile Include="ui\screens\accounts\accounts_capture.cpp" />
+    <ClCompile Include="ui\screens\accounts\accounts_dialogs.cpp" />
+    <ClCompile Include="ui\screens\add_account\bulk.cpp" />
+    <ClCompile Include="ui\screens\add_account\bundle_method.cpp" />
+    <ClCompile Include="ui\screens\add_account\edit_account.cpp" />
+    <ClCompile Include="ui\screens\authenticator\capture_scenes.cpp" />
+    <ClCompile Include="ui\screens\authenticator\link_flow.cpp" />
+    <ClCompile Include="ui\screens\authenticator\secret_dialogs.cpp" />
+    <ClCompile Include="ui\screens\confirmations\capture_scenes.cpp" />
+    <ClCompile Include="ui\screens\confirmations\dialogs.cpp" />
+    <ClCompile Include="ui\screens\confirmations\screen_view.cpp" />
+    <ClCompile Include="ui\screens\cs2\cs2_capture.cpp" />
+    <ClCompile Include="ui\screens\cs2\cs2_inventory.cpp" />
+    <ClCompile Include="ui\screens\cs2\cs2_items.cpp" />
+    <ClCompile Include="ui\screens\cs2\cs2_overview.cpp" />
+    <ClCompile Include="ui\screens\cs2\cs2_session.cpp" />
+    <ClCompile Include="ui\screens\cs2\cs2_storage.cpp" />
+    <ClCompile Include="ui\screens\settings\about.cpp" />
+    <ClCompile Include="ui\screens\settings\accounts_refresh.cpp" />
+    <ClCompile Include="ui\screens\settings\appearance.cpp" />
+    <ClCompile Include="ui\screens\settings\capture_scenes.cpp" />
+    <ClCompile Include="ui\screens\settings\cleaner.cpp" />
+    <ClCompile Include="ui\screens\settings\cs2.cpp" />
+    <ClCompile Include="ui\screens\settings\general.cpp" />
+    <ClCompile Include="ui\screens\settings\hwid_spoofer.cpp" />
+    <ClCompile Include="ui\screens\settings\loaders.cpp" />
+    <ClCompile Include="ui\screens\settings\network.cpp" />
+    <ClCompile Include="ui\screens\settings\notifications.cpp" />
+    <ClCompile Include="ui\screens\settings\page.cpp" />
+    <ClCompile Include="ui\screens\settings\privacy_security.cpp" />
+    <ClCompile Include="ui\screens\settings\sign_in_launch.cpp" />
+    <ClCompile Include="ui\screens\settings\steam_guard.cpp" />
+    <ClCompile Include="ui\screens\settings\trading.cpp" />
+    <ClCompile Include="ui\screens\settings\vaults_storage.cpp" />
+    <ClCompile Include="ui\screens\trade_offers\capture_scenes.cpp" />
+    <ClCompile Include="ui\screens\trade_offers\history.cpp" />
+    <ClCompile Include="ui\screens\trade_offers\items.cpp" />
+    <ClCompile Include="ui\screens\trade_offers\send_flow.cpp" />
+    <ClCompile Include="ui\screens\trade_offers\text.cpp" />
+    <ClCompile Include="ui\screens\unlock\capture_scenes.cpp" />
+    <ClCompile Include="ui\screens\unlock\locked_card.cpp" />
+    <ClCompile Include="ui\screens\unlock\session.cpp" />
     <ClCompile Include="ui\widgets\avatar_cache.cpp" />
-    <ClCompile Include="ui\widgets\rank_image.cpp" />
-    <ClCompile Include="ui\widgets\stepper.cpp" />
     <ClCompile Include="ui\widgets\bundle_dialogs.cpp" />
-    <ClCompile Include="ui\widgets\status_markers.cpp" />
+    <ClCompile Include="ui\widgets\rank_image.cpp" />
     <ClCompile Include="ui\widgets\toast_stack.cpp" />
-    <ClCompile Include="ui\widgets\sda_backup_dialogs.cpp" />
-    <ClCompile Include="ui\widgets\sda_wizard_dialogs.cpp" />
     <ClCompile Include="core\sda\mafile_export.cpp" />
     <ClCompile Include="core\sda\conf_audit.cpp" />
     <ClCompile Include="core\hwid\hwid_profile.cpp" />
@@ -320,6 +389,8 @@
     <ClInclude Include="app\job_pump.hpp" />
     <ClInclude Include="app\conf_poller.hpp" />
     <ClInclude Include="app\cleaner_runner.hpp" />
+    <ClInclude Include="app\ui_capture.hpp" />
+    <ClInclude Include="app\ui_capture_internal.hpp" />
     <ClInclude Include="core\version.hpp" />
     <ClInclude Include="core\time_aligner.hpp" />
     <ClInclude Include="core\log.hpp" />
@@ -430,48 +501,53 @@
     <ClInclude Include="platform\tray_icon.hpp" />
     <ClInclude Include="platform\startup_task.hpp" />
     <ClInclude Include="platform\window_affinity.hpp" />
-    <ClInclude Include="ui\main_window.hpp" />
-    <ClInclude Include="ui\theme.hpp" />
     <ClInclude Include="ui\fonts.hpp" />
     <ClInclude Include="ui\icons.hpp" />
+    <ClInclude Include="ui\main_window.hpp" />
+    <ClInclude Include="ui\theme.hpp" />
     <ClInclude Include="ui\util.hpp" />
-    <ClInclude Include="ui\screens\unlock_screen.hpp" />
-    <ClInclude Include="ui\screens\vault_picker_screen.hpp" />
+    <ClInclude Include="ui\kit\account.hpp" />
+    <ClInclude Include="ui\kit\actions.hpp" />
+    <ClInclude Include="ui\kit\feedback.hpp" />
+    <ClInclude Include="ui\kit\format.hpp" />
+    <ClInclude Include="ui\kit\layout.hpp" />
+    <ClInclude Include="ui\kit\navigation.hpp" />
+    <ClInclude Include="ui\kit\page.hpp" />
+    <ClInclude Include="ui\kit\row.hpp" />
+    <ClInclude Include="ui\kit\row_line.hpp" />
+    <ClInclude Include="ui\kit\secrets.hpp" />
+    <ClInclude Include="ui\kit\standing.hpp" />
+    <ClInclude Include="ui\kit\transient.hpp" />
+    <ClInclude Include="ui\shell\shell.hpp" />
     <ClInclude Include="ui\screens\accounts_screen.hpp" />
-    <ClInclude Include="ui\screens\accounts_list_view.hpp" />
-    <ClInclude Include="ui\screens\sda_screen.hpp" />
-    <ClInclude Include="ui\screens\add_account_screen.hpp" />
     <ClInclude Include="ui\screens\add_account_detail.hpp" />
-    <ClInclude Include="ui\screens\confirmations_screen.hpp" />
+    <ClInclude Include="ui\screens\add_account_screen.hpp" />
     <ClInclude Include="ui\screens\confirmations_detail.hpp" />
-    <ClInclude Include="ui\screens\settings_screen.hpp" />
-    <ClInclude Include="ui\screens\settings_sections.hpp" />
-    <ClInclude Include="ui\screens\trade_offers_screen.hpp" />
+    <ClInclude Include="ui\screens\confirmations_screen.hpp" />
     <ClInclude Include="ui\screens\cs2_screen.hpp" />
     <ClInclude Include="ui\screens\cs2_screen_state.hpp" />
+    <ClInclude Include="ui\screens\sda_screen.hpp" />
+    <ClInclude Include="ui\screens\settings_screen.hpp" />
+    <ClInclude Include="ui\screens\settings_sections.hpp" />
     <ClInclude Include="ui\screens\trade_offers_detail.hpp" />
-    <ClInclude Include="ui\widgets\rail_nav.hpp" />
-    <ClInclude Include="ui\widgets\title_bar.hpp" />
-    <ClInclude Include="ui\widgets\account_card.hpp" />
-    <ClInclude Include="ui\widgets\account_context_menu.hpp" />
-    <ClInclude Include="ui\widgets\account_panel.hpp" />
-    <ClInclude Include="ui\widgets\avatar.hpp" />
-    <ClInclude Include="ui\widgets\login_method_control.hpp" />
-    <ClInclude Include="ui\widgets\tag_chip.hpp" />
-    <ClInclude Include="ui\widgets\trust_badge.hpp" />
-    <ClInclude Include="ui\widgets\code_display.hpp" />
-    <ClInclude Include="ui\widgets\search_bar.hpp" />
-    <ClInclude Include="ui\widgets\ban_pills.hpp" />
-    <ClInclude Include="ui\widgets\master_pw_field.hpp" />
-    <ClInclude Include="ui\widgets\redacted_text.hpp" />
+    <ClInclude Include="ui\screens\trade_offers_screen.hpp" />
+    <ClInclude Include="ui\screens\unlock_screen.hpp" />
+    <ClInclude Include="ui\screens\vault_picker_screen.hpp" />
+    <ClInclude Include="ui\screens\accounts\accounts_internal.hpp" />
+    <ClInclude Include="ui\screens\add_account\bulk.hpp" />
+    <ClInclude Include="ui\screens\authenticator\dialogs.hpp" />
+    <ClInclude Include="ui\screens\confirmations\view.hpp" />
+    <ClInclude Include="ui\screens\cs2\cs2_internal.hpp" />
+    <ClInclude Include="ui\screens\settings\capture_hooks.hpp" />
+    <ClInclude Include="ui\screens\settings\categories.hpp" />
+    <ClInclude Include="ui\screens\settings\page.hpp" />
+    <ClInclude Include="ui\screens\trade_offers\trade_offers_ui.hpp" />
+    <ClInclude Include="ui\screens\unlock\locked_card.hpp" />
+    <ClInclude Include="ui\screens\unlock\session.hpp" />
     <ClInclude Include="ui\widgets\avatar_cache.hpp" />
-    <ClInclude Include="ui\widgets\rank_image.hpp" />
-    <ClInclude Include="ui\widgets\stepper.hpp" />
     <ClInclude Include="ui\widgets\bundle_dialogs.hpp" />
-    <ClInclude Include="ui\widgets\status_markers.hpp" />
+    <ClInclude Include="ui\widgets\rank_image.hpp" />
     <ClInclude Include="ui\widgets\toast_stack.hpp" />
-    <ClInclude Include="ui\widgets\sda_backup_dialogs.hpp" />
-    <ClInclude Include="ui\widgets\sda_wizard_dialogs.hpp" />
     <ClInclude Include="core\hwid\ipc_layout.hpp" />
     <ClInclude Include="core\hwid\hwid_components.hpp" />
     <ClInclude Include="core\hwid\hwid_profile.hpp" />
@@ -579,6 +655,10 @@
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="third_party\imgui\backends\imgui_impl_dx11.cpp">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="third_party\imgui\misc\freetype\imgui_freetype.cpp">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
@@ -1138,8 +1218,25 @@
     <None Include="scripts\gen_protos.ps1" />
     <None Include="scripts\init_third_party.ps1" />
     <None Include="scripts\embed_dll.ps1" />
+    <None Include="scripts\build_facet.ps1" />
+    <None Include="cmake\facet\CMakeLists.txt" />
     <None Include=".github\workflows\build.yml" />
   </ItemGroup>
+  <ItemGroup Label="Facet build inputs">
+    <SamFacetInput Include="$(ProjectDir)third_party\facet\src\**\*.cpp;$(ProjectDir)third_party\facet\src\**\*.h" />
+    <SamFacetInput Include="$(ProjectDir)third_party\facet\include\**\*.h" />
+    <SamFacetInput Include="$(ProjectDir)third_party\facet\assets\**\*.svg" />
+    <SamFacetInput Include="$(ProjectDir)third_party\facet\CMakeLists.txt;$(ProjectDir)third_party\facet\cmake\*.cmake" />
+    <SamFacetInput Include="$(ProjectDir)third_party\imgui\*.h;$(ProjectDir)third_party\freetype\CMakeLists.txt" />
+    <SamFacetInput Include="$(ProjectDir)cmake\facet\CMakeLists.txt;$(ProjectDir)scripts\build_facet.ps1" />
+  </ItemGroup>
+  <!-- Builds Facet, lunasvg, plutovg and FreeType (and libprotobufd in Debug) through
+       cmake\facet before anything compiles: imgui_freetype.cpp needs the ftoption.h that
+       configuring FreeType generates, and the link needs the libraries. Skipped while the
+       stamp is newer than every input. -->
+  <Target Name="BuildFacet" BeforeTargets="ClCompile" Inputs="@(SamFacetInput)" Outputs="$(SamFacetStamp)">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(ProjectDir)scripts\build_facet.ps1&quot; -Configuration $(Configuration) -Toolset $(PlatformToolset)" WorkingDirectory="$(ProjectDir)" ContinueOnError="false" />
+  </Target>
   <Target Name="EmbedHwidDll" BeforeTargets="ClCompile"
           Inputs="$(SolutionDir)build\$(Configuration)\hwid_spoofer.dll"
           Outputs="$(ProjectDir)core\hwid\gen\hwid_dll_bytes.hpp"

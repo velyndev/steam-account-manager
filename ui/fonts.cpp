@@ -1,7 +1,9 @@
 #include "ui/fonts.hpp"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -10,13 +12,26 @@
 
 #include <imgui.h>
 
+#include <facet/core/text.h>
+#include <facet/core/theme.h>
+
 namespace sam::ui::fonts {
 
 namespace {
 
-ImFont* g_body = nullptr;
-ImFont* g_title = nullptr;
-ImFont* g_badge = nullptr;
+constexpr char kFallbackPrefix[] = "sam-fallback ";
+
+struct FallbackFace {
+    const char* file;
+    int face_index;
+};
+
+constexpr FallbackFace kFallbacks[] = {
+    {"msyh.ttc", 0},
+    {"malgun.ttf", 0},
+    {"seguisym.ttf", 0},
+    {"cambria.ttc", 1},
+};
 
 std::filesystem::path windows_font_path(const char* filename) {
     const char* win_dir = std::getenv("WINDIR");
@@ -35,100 +50,60 @@ std::vector<std::uint8_t> read_font_file(const std::filesystem::path& path) {
     return bytes;
 }
 
-std::vector<std::uint8_t>& cached_font_bytes(const std::filesystem::path& path) {
+std::vector<std::uint8_t>& cached_font_bytes(const char* filename) {
     static std::map<std::string, std::vector<std::uint8_t>> cache;
-    const std::string key = path.string();
-    auto it = cache.find(key);
+    auto it = cache.find(filename);
     if (it == cache.end()) {
-        it = cache.emplace(key, read_font_file(path)).first;
+        it = cache.emplace(filename, read_font_file(windows_font_path(filename))).first;
     }
     return it->second;
 }
 
-ImFont* add_font_from_disk(ImFontAtlas* atlas, const std::filesystem::path& path,
-                           float pixel_size, const ImWchar* glyph_ranges,
-                           bool merge = false, int font_no = 0) {
-    std::vector<std::uint8_t>& bytes = cached_font_bytes(path);
-    if (bytes.empty()) return nullptr;
-
-    ImFontConfig cfg;
-    cfg.FontDataOwnedByAtlas = false;
-    cfg.MergeMode = merge;
-    cfg.FontNo = static_cast<ImU32>(font_no);
-    cfg.OversampleH = 5;
-    cfg.OversampleV = 5;
-    cfg.PixelSnapH = false;
-    cfg.RasterizerMultiply = 1.20F;
-
-    return atlas->AddFontFromMemoryTTF(bytes.data(), static_cast<int>(bytes.size()),
-                                       pixel_size, &cfg, glyph_ranges);
+bool has_fallbacks(const ImFont* font) {
+    for (const ImFontConfig* src : font->Sources) {
+        if (src != nullptr && std::strncmp(src->Name, kFallbackPrefix, sizeof(kFallbackPrefix) - 1) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
-const ImWchar* extended_glyph_ranges() {
-    static const ImWchar ranges[] = {
-        0x0020, 0x00FF,
-        0x2000, 0x206F,
-        0x2070, 0x209F,
-        0x20A0, 0x20CF,
-        0x2100, 0x214F,
-        0x2190, 0x21FF,
-        0x2200, 0x22FF,
-        0x2300, 0x23FF,
-        0x25A0, 0x25FF,
-        0x2600, 0x26FF,
-        0x2700, 0x27BF,
-        0xE000, 0xF8FF,
-        0,
-    };
-    return &ranges[0];
+void merge_into(ImFontAtlas* atlas, ImFont* font) {
+    for (const FallbackFace& face : kFallbacks) {
+        std::vector<std::uint8_t>& bytes = cached_font_bytes(face.file);
+        if (bytes.empty()) continue;
+        ImFontConfig cfg;
+        cfg.MergeMode = true;
+        cfg.DstFont = font;
+        cfg.FontDataOwnedByAtlas = false;
+        cfg.FontNo = static_cast<ImU32>(face.face_index);
+        std::snprintf(cfg.Name, sizeof(cfg.Name), "%s%s", kFallbackPrefix, face.file);
+        atlas->AddFontFromMemoryTTF(bytes.data(), static_cast<int>(bytes.size()), 0.0F, &cfg);
+    }
 }
 
-void merge_fallback_fonts(ImFontAtlas* atlas, float pixel_size) {
-    add_font_from_disk(atlas, windows_font_path("msyh.ttc"),     pixel_size, nullptr, true, 0);
-    add_font_from_disk(atlas, windows_font_path("malgun.ttf"),   pixel_size, nullptr, true, 0);
-    add_font_from_disk(atlas, windows_font_path("seguisym.ttf"), pixel_size, nullptr, true, 0);
-    add_font_from_disk(atlas, windows_font_path("cambria.ttc"),  pixel_size, nullptr, true, 1);
+ImFont* or_default(ImFont* font) {
+    if (font != nullptr || ImGui::GetCurrentContext() == nullptr) return font;
+    const ImGuiIO& io = ImGui::GetIO();
+    if (io.FontDefault != nullptr) return io.FontDefault;
+    return io.Fonts->Fonts.Size > 0 ? io.Fonts->Fonts[0] : nullptr;
 }
 
 }  // namespace
 
-void load(float scale) {
-    ImGuiIO& io = ImGui::GetIO();
-    io.Fonts->Clear();
-
-    const float body_size = 16.0F * scale;
-    const float title_size = 17.0F * scale;
-    const float badge_size = 20.0F * scale;
-
-    const ImWchar* ranges = extended_glyph_ranges();
-    static const ImWchar badge_ranges[] = {
-        0x0020, 0x0020,
-        0x002C, 0x002E,
-        0x0030, 0x0039,
-        0,
-    };
-
-    g_body = add_font_from_disk(io.Fonts, windows_font_path("segoeui.ttf"), body_size, ranges);
-    if (g_body) merge_fallback_fonts(io.Fonts, body_size);
-
-    g_title = add_font_from_disk(io.Fonts, windows_font_path("segoeuib.ttf"), title_size, ranges);
-    if (g_title) merge_fallback_fonts(io.Fonts, title_size);
-
-    g_badge = add_font_from_disk(io.Fonts, windows_font_path("segoeuib.ttf"), badge_size, badge_ranges);
-
-    if (!g_body) {
-        g_body = io.Fonts->AddFontDefault();
-    }
-    if (!g_title) {
-        g_title = g_body;
-    }
-    if (!g_badge) {
-        g_badge = g_title;
+void attach_fallbacks() {
+    if (ImGui::GetCurrentContext() == nullptr) return;
+    ImFontAtlas* atlas = ImGui::GetIO().Fonts;
+    if (atlas == nullptr || atlas->Locked) return;
+    for (const facet::FontWeight weight :
+         {facet::FontWeight::Regular, facet::FontWeight::Semibold, facet::FontWeight::Bold}) {
+        for (const bool display : {false, true}) {
+            ImFont* font = facet::WeightFont(weight, display);
+            if (font != nullptr && !has_fallbacks(font)) merge_into(atlas, font);
+        }
     }
 }
 
-ImFont* body()  { return g_body; }
-ImFont* title() { return g_title; }
-ImFont* badge() { return g_badge; }
+ImFont* badge() { return or_default(facet::WeightFont(facet::FontWeight::Bold)); }
 
 }  // namespace sam::ui::fonts

@@ -1,5 +1,9 @@
 #pragma once
 
+// The account bundle: export accounts to an encrypted .samvault file (a Facet modal the Accounts
+// screen opens with request_export_bundle and draws every frame), and import one (the steps the
+// Add account screen runs on its page).
+
 #include <array>
 #include <cstddef>
 #include <filesystem>
@@ -9,6 +13,7 @@
 #include "app/app_state.hpp"
 #include "core/account_store/account.hpp"
 #include "core/account_store/store.hpp"
+#include "ui/screens/add_account/bulk.hpp"
 
 namespace sam::ui::widgets {
 
@@ -20,24 +25,32 @@ struct ExportBundleState {
     bool open = false;
     // Empty = export every account in the vault.
     std::vector<std::string> account_ids;
-    std::array<char, kBundlePassphraseBufLen> passphrase_buf{};
-    std::array<char, kBundlePassphraseBufLen> confirm_buf{};
-    std::string status;
+    std::string status;  // the export error, or the saved path once done
     bool done = false;
-    bool show_passphrase = false;
+    // The checklist: one id per offered account and whether it is ticked (built on the first
+    // frame from account_ids, or the whole vault).
+    std::vector<std::string> row_ids;
+    std::vector<char> row_checked;
+    bool rows_built = false;
+    std::size_t exported = 0;
+    std::string passphrase;
+    std::string confirm;
 };
 
 struct ImportBundleState {
     bool open = false;
     std::filesystem::path picked_path;
     std::array<char, kBundlePassphraseBufLen> passphrase_buf{};
-    std::string error;
+    std::string error;      // a plain sentence about why the bundle could not be opened
+    std::string error_raw;  // the technical text behind "Details"
     bool have_preview = false;
     core::Vault preview_vault;
     core::store::MergeReport preview_report;
     bool done = false;
     std::string status;
-    bool show_passphrase = false;
+    bool wrong_passphrase = false; // the last unlock failed on the passphrase; cleared on typing
+    // One row per account of the bundle (payload: index in preview_vault.accounts).
+    std::vector<screens::add_account_detail::BulkRow> rows;
 };
 
 // Empty `ids` exports every account in the vault.
@@ -47,8 +60,20 @@ void request_export_bundle(ExportBundleState& state,
 void request_import_bundle(ImportBundleState& state,
                             std::filesystem::path path);
 
-// Safe to call every frame; render nothing until a request comes in.
+// Safe to call every frame; renders nothing until a request comes in. The dialog closes on lock
+// and vault change and when the user leaves the Accounts screen.
 void draw_export_bundle_modal(app::AppState& app, ExportBundleState& state);
-void draw_import_bundle_modal(app::AppState& app, ImportBundleState& state);
+
+// The import steps for a page: reads the bundle with the passphrase in state.passphrase_buf
+// (sets have_preview and the rows, or wrong_passphrase, or error); merges the ticked rows into
+// the vault and saves it (sets done and each row's result).
+void bundle_unlock(app::AppState& app, ImportBundleState& state);
+void bundle_import(app::AppState& app, ImportBundleState& state);
+// Clears the import state and wipes the passphrase.
+void reset_import_bundle(ImportBundleState& state);
+
+// Fills state.rows from state.preview_vault (new or replacing, every row ticked). Called after a
+// bundle was unlocked; capture scenes call it after seeding a preview.
+void build_import_rows(app::AppState& app, ImportBundleState& state);
 
 }  // namespace sam::ui::widgets

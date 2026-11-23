@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 #include <system_error>
+#include <unordered_set>
 #include <vector>
 
 #include <windows.h>
@@ -14,12 +15,20 @@
 #include <d3d11.h>
 #include <dxgi.h>
 #include <dwmapi.h>
+#include <shellscalingapi.h>
 #include <uxtheme.h>
 #include <windowsx.h>
 
 #include <imgui.h>
 #include <imgui_impl_dx11.h>
 #include <imgui_impl_win32.h>
+#include <imgui_internal.h>
+
+#include <facet/core/context.h>
+#include <facet/core/layout.h>
+#include <facet/core/scale.h>
+#include <facet/core/theme.h>
+#include <facet/widgets/containers.h>
 
 #include "app/app_paths.hpp"
 #include "app/app_state.hpp"
@@ -27,6 +36,7 @@
 #include "app/conf_poller.hpp"
 #include "app/job_pump.hpp"
 #include "app/resource.h"
+#include "app/ui_capture.hpp"
 #include "core/account_store/store.hpp"
 #include "core/cs2_gc/cs2_gc_client.hpp"
 #include "core/http/client.hpp"
@@ -53,7 +63,8 @@
 #include "ui/util.hpp"
 #include "ui/widgets/avatar_cache.hpp"
 #include "ui/widgets/rank_image.hpp"
-#include "ui/widgets/title_bar.hpp"
+
+#pragma comment(lib, "shcore.lib")  // GetDpiForMonitor
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -80,6 +91,14 @@ bool                    g_occluded = false;
 sam::app::AppState* g_state = nullptr;
 
 bool g_imgui_ready = false;
+
+float g_dpi_scale = 1.0F;
+
+// The window's last restored (not maximized, not minimized) rectangle in screen pixels, kept for
+// the saved placement.
+RECT g_restored_rect{};
+bool g_have_restored_rect = false;
+constexpr char kPlacementId[] = "main";
 
 constexpr UINT WM_APP_STARTUP_REFRESH = WM_APP + 1;
 
@@ -149,11 +168,12 @@ bool has_extension(const std::wstring& path, std::wstring_view ext_lower) {
     return true;
 }
 
-enum class DropKind { Skip, MaFile, InfoDat };
+enum class DropKind { Skip, MaFile, InfoDat, Bundle };
 
 DropKind classify_path(const std::wstring& path) {
-    if (has_extension(path, L".mafile")) return DropKind::MaFile;
-    if (has_extension(path, L".dat"))    return DropKind::InfoDat;
+    if (has_extension(path, L".mafile"))   return DropKind::MaFile;
+    if (has_extension(path, L".dat"))      return DropKind::InfoDat;
+    if (has_extension(path, L".samvault")) return DropKind::Bundle;
     return DropKind::Skip;
 }
 
@@ -169,6 +189,7 @@ void scan_directory(const std::wstring& dir_w,
         switch (classify_path(p)) {
             case DropKind::MaFile:  out_mafiles.push_back(sam::ui::to_utf8(p)); break;
             case DropKind::InfoDat: out_info_dat.push_back(sam::ui::to_utf8(p)); break;
+            case DropKind::Bundle:  // only a bundle dropped as a file, not one inside a folder
             case DropKind::Skip: break;
         }
     }
@@ -179,6 +200,7 @@ void handle_dropped_files(HDROP hdrop) {
 
     std::vector<std::string> mafiles;
     std::vector<std::string> info_dat;
+    std::string bundle;
 
     const UINT count = DragQueryFileW(hdrop, 0xFFFFFFFFu, nullptr, 0);
     for (UINT i = 0; i < count; ++i) {
@@ -199,12 +221,15 @@ void handle_dropped_files(HDROP hdrop) {
             case DropKind::InfoDat:
                 info_dat.push_back(sam::ui::to_utf8(path));
                 break;
+            case DropKind::Bundle:
+                if (bundle.empty()) bundle = sam::ui::to_utf8(path);
+                break;
             case DropKind::Skip: break;
         }
     }
     DragFinish(hdrop);
 
-    if (mafiles.empty() && info_dat.empty()) return;
+    if (mafiles.empty() && info_dat.empty() && bundle.empty()) return;
 
     {
         std::lock_guard lk(g_state->drop_mutex);
@@ -217,10 +242,62 @@ void handle_dropped_files(HDROP hdrop) {
             g_state->pending_mafile_focus = true;
         } else if (!info_dat.empty()) {
             g_state->pending_info_dat_focus = true;
+        } else {
+            g_state->pending_bundle_drop = std::move(bundle);
         }
     }
     g_state->selected_account_id.clear();
     g_state->current_screen = sam::app::Screen::AddAccount;
+}
+
+void remember_restored_rect(HWND hwnd) {
+    if (IsZoomed(hwnd) || IsIconic(hwnd)) return;
+    RECT r{};
+    if (GetWindowRect(hwnd, &r) && r.right > r.left && r.bottom > r.top) {
+        g_restored_rect = r;
+        g_have_restored_rect = true;
+    }
+}
+
+// Stores the placement in Facet's part of the ini file: the restored rectangle's corner in
+// screen pixels, its size in design units, and whether the window is maximized.
+void save_placement(HWND hwnd) {
+    if (!g_imgui_ready || !g_have_restored_rect) return;
+    facet::FramePlacement p;
+    const float scale = facet::Scale();
+    p.position = ImVec2(static_cast<float>(g_restored_rect.left), static_cast<float>(g_restored_rect.top));
+    p.restoredSize = ImVec2(static_cast<float>(g_restored_rect.right - g_restored_rect.left) / scale,
+                            static_cast<float>(g_restored_rect.bottom - g_restored_rect.top) / scale);
+    p.scale = scale;
+    p.maximized = IsZoomed(hwnd) != FALSE;
+    facet::SaveAppFramePlacement(kPlacementId, p);
+}
+
+// Applies a saved placement before the window shows: the size in units times the scale of the
+// monitor that holds the saved corner, clamped into that monitor's work area so the title bar
+// is always reachable. Returns whether one was applied and writes the saved maximized state.
+bool restore_placement(HWND hwnd, float ui_scale, bool* maximized) {
+    facet::FramePlacement p;
+    if (!facet::LoadAppFramePlacement(kPlacementId, &p)) return false;
+    if (p.restoredSize.x <= 0.0F || p.restoredSize.y <= 0.0F) return false;
+    const POINT corner{static_cast<LONG>(p.position.x), static_cast<LONG>(p.position.y)};
+    HMONITOR monitor = MonitorFromPoint(corner, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(monitor, &mi)) return false;
+    UINT dpi_x = 96;
+    UINT dpi_y = 96;
+    if (FAILED(GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &dpi_x, &dpi_y))) dpi_x = 96;
+    const float scale = static_cast<float>(dpi_x) / 96.0F * ui_scale;
+    const LONG work_w = mi.rcWork.right - mi.rcWork.left;
+    const LONG work_h = mi.rcWork.bottom - mi.rcWork.top;
+    const LONG w = std::min(work_w, static_cast<LONG>(p.restoredSize.x * scale + 0.5F));
+    const LONG h = std::min(work_h, static_cast<LONG>(p.restoredSize.y * scale + 0.5F));
+    const LONG x = std::clamp(corner.x, mi.rcWork.left, mi.rcWork.right - w);
+    const LONG y = std::clamp(corner.y, mi.rcWork.top, mi.rcWork.bottom - h);
+    SetWindowPos(hwnd, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+    *maximized = p.maximized;
+    return true;
 }
 
 LRESULT WINAPI wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -229,6 +306,7 @@ LRESULT WINAPI wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_SIZE:
             if (wp == SIZE_MINIMIZED) return 0;
+            if (wp == SIZE_RESTORED) remember_restored_rect(hwnd);
             g_resize_w = LOWORD(lp);
             g_resize_h = HIWORD(lp);
             return 0;
@@ -253,47 +331,79 @@ LRESULT WINAPI wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
 
         case WM_NCHITTEST: {
-
+            // Facet's app frame answers from its last frame: the resize band, the title bar's
+            // free area (Caption) and its window buttons, in client pixels, so the answer matches
+            // what was drawn at every DPI and UI scale. Before the first frame everything is
+            // client. Maximize reports HTMAXBUTTON so Windows shows the snap layouts over it.
+            if (!g_imgui_ready) return HTCLIENT;
             POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
-            RECT wr;
-            GetWindowRect(hwnd, &wr);
-            const bool zoomed = IsZoomed(hwnd);
-            const float scale = static_cast<float>(GetDpiForWindow(hwnd)) / 96.0F;
-            const int border = zoomed ? 0
-                : static_cast<int>(sam::ui::widgets::kResizeBorder * scale);
-
-            const bool left   = pt.x <  wr.left  + border;
-            const bool right  = pt.x >= wr.right - border;
-            const bool top    = pt.y <  wr.top   + border;
-            const bool bottom = pt.y >= wr.bottom - border;
-
-            if (!zoomed) {
-                if (top && left)     return HTTOPLEFT;
-                if (top && right)    return HTTOPRIGHT;
-                if (bottom && left)  return HTBOTTOMLEFT;
-                if (bottom && right) return HTBOTTOMRIGHT;
-                if (left)   return HTLEFT;
-                if (right)  return HTRIGHT;
-                if (top)    return HTTOP;
-                if (bottom) return HTBOTTOM;
-            }
-
-            const int title_h = static_cast<int>(sam::ui::widgets::kTitleBarHeight * scale);
-            if (pt.y < wr.top + title_h) {
-                const int strip = static_cast<int>(sam::ui::widgets::kCaptionBtnWidth *
-                                                   sam::ui::widgets::kCaptionBtnCount * scale);
-                if (pt.x >= wr.right - strip) return HTCLIENT;
-                return HTCAPTION;
+            ScreenToClient(hwnd, &pt);
+            const bool blocked = sam::ui::caption_blocked();
+            switch (facet::AppFrameHitTest(ImVec2(static_cast<float>(pt.x), static_cast<float>(pt.y)))) {
+                case facet::FrameHit::Left:           return HTLEFT;
+                case facet::FrameHit::Right:          return HTRIGHT;
+                case facet::FrameHit::Top:            return HTTOP;
+                case facet::FrameHit::Bottom:         return HTBOTTOM;
+                case facet::FrameHit::TopLeft:        return HTTOPLEFT;
+                case facet::FrameHit::TopRight:       return HTTOPRIGHT;
+                case facet::FrameHit::BottomLeft:     return HTBOTTOMLEFT;
+                case facet::FrameHit::BottomRight:    return HTBOTTOMRIGHT;
+                case facet::FrameHit::Caption:        return blocked ? HTCLIENT : HTCAPTION;
+                case facet::FrameHit::MaximizeButton: return blocked ? HTCLIENT : HTMAXBUTTON;
+                case facet::FrameHit::MinimizeButton:
+                case facet::FrameHit::CloseButton:
+                case facet::FrameHit::Client:         return HTCLIENT;
             }
             return HTCLIENT;
         }
 
+        // Over HTMAXBUTTON Windows sends non-client button messages. The Win32 backend turns the
+        // non-client mouse moves into positions but not the buttons, so they are passed to Dear
+        // ImGui here and kept from DefWindowProc: the drawn maximize button then shows hover and
+        // press and reports its activation.
+        case WM_NCLBUTTONDOWN:
+        case WM_NCLBUTTONDBLCLK:
+        case WM_NCLBUTTONUP:
+            if (wp == HTMAXBUTTON && g_imgui_ready) {
+                ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Left, msg != WM_NCLBUTTONUP);
+                return 0;
+            }
+            break;
+
+        case WM_EXITSIZEMOVE:
+            remember_restored_rect(hwnd);
+            save_placement(hwnd);
+            return 0;
+
         case WM_GETMINMAXINFO: {
 
+            // The app frame's minimum (ui::kMinWindowWidth x kMinWindowHeight units) in pixels at
+            // the current DPI and UI scale; before the first frame the same units at the DPI
+            // alone. Never more than the monitor's work area, so a large UI scale cannot make
+            // the window bigger than the screen.
             auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
-            const float scale = static_cast<float>(GetDpiForWindow(hwnd)) / 96.0F;
-            mmi->ptMinTrackSize.x = static_cast<LONG>(640 * scale);
-            mmi->ptMinTrackSize.y = static_cast<LONG>(480 * scale);
+            const float dpi = static_cast<float>(GetDpiForWindow(hwnd)) / 96.0F;
+            ImVec2 min_size = g_imgui_ready ? facet::AppFrameMinSize() : ImVec2(0.0F, 0.0F);
+            if (min_size.x <= 0.0F || min_size.y <= 0.0F) {
+                min_size = ImVec2(sam::ui::kMinWindowWidth * dpi, sam::ui::kMinWindowHeight * dpi);
+            }
+            MONITORINFO mi{};
+            mi.cbSize = sizeof(mi);
+            if (GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi)) {
+                min_size.x = std::min(min_size.x, static_cast<float>(mi.rcWork.right - mi.rcWork.left));
+                min_size.y = std::min(min_size.y, static_cast<float>(mi.rcWork.bottom - mi.rcWork.top));
+            }
+            mmi->ptMinTrackSize.x = static_cast<LONG>(min_size.x);
+            mmi->ptMinTrackSize.y = static_cast<LONG>(min_size.y);
+            return 0;
+        }
+
+        case WM_DPICHANGED: {
+            g_dpi_scale = static_cast<float>(HIWORD(wp)) / 96.0F;
+            const RECT* suggested = reinterpret_cast<const RECT*>(lp);
+            SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                         suggested->right - suggested->left, suggested->bottom - suggested->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
             return 0;
         }
 
@@ -471,10 +581,29 @@ int run_startup_refresh(HINSTANCE inst, HWND hwnd) {
     return 0;
 }
 
+// Dear ImGui's recoverable usage errors (an unbalanced Begin/End, SetCursorPos past a window's
+// end with no item after it, ...). Their assert and tooltip are off in every configuration, so a
+// layout mistake never opens a blocking dialog; each distinct message goes to the log once.
+void on_imgui_usage_error(ImGuiContext* ctx, void* user_data, const char* msg) {
+    auto* seen = static_cast<std::unordered_set<std::string>*>(user_data);
+    const char* window = (ctx != nullptr && ctx->CurrentWindow != nullptr) ? ctx->CurrentWindow->Name : "?";
+    std::string text = std::string("in window '") + window + "': " + (msg != nullptr ? msg : "");
+    std::replace(text.begin(), text.end(), '\n', ' ');
+    if (seen->insert(text).second) SAM_LOG_WARN("ui: Dear ImGui usage error {}", text);
+}
+
 }  // namespace
 
 _Use_decl_annotations_
 int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmd_line, int) {
+    if (sam::app::ui_capture::requested(cmd_line)) {
+#ifdef SAM_UI_CAPTURE
+        return sam::app::ui_capture::run(cmd_line);
+#else
+        return 2;
+#endif
+    }
+
     sam::platform::dpi::enable_per_monitor_v2();
 
     const bool startup_mode = cmd_line && wcsstr(cmd_line, L"--startup") != nullptr;
@@ -553,25 +682,55 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmd_line, int) {
 
     BOOL cloak = TRUE;
     DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, &cloak, sizeof(cloak));
-    if (start_minimized) {
-        ShowWindow(hwnd, SW_SHOWMINNOACTIVE);
-    } else {
-        ShowWindow(hwnd, SW_SHOW);
-        ShowWindow(hwnd, SW_SHOWNORMAL);
-    }
+
+    sam::app::AppState state;
+    state.is_elevated = sam::platform::process::is_elevated();
+    state.load_settings();
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
-    io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    static std::unordered_set<std::string> imgui_usage_errors;
+    io.ConfigErrorRecoveryEnableAssert = false;
+    io.ConfigErrorRecoveryEnableTooltip = false;
+    ImGui::GetCurrentContext()->ErrorCallback = &on_imgui_usage_error;
+    ImGui::GetCurrentContext()->ErrorCallbackUserData = &imgui_usage_errors;
+    // Facet's widget state and the window placement live in data_dir()/ui_state.ini.
+    sam::ui::configure_ini_file();
 
-    sam::ui::theme::apply_dark();
-    sam::ui::fonts::load(1.0F);
+    g_dpi_scale = static_cast<float>(GetDpiForWindow(hwnd)) / 96.0F;
+    facet::SetScaleMode(facet::ScaleMode::FollowDpi);
+    facet::SetDpiScale(g_dpi_scale);
+    sam::ui::theme::apply_appearance(state.settings, false);
 
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_device, g_context);
     g_imgui_ready = true;
+
+    facet::InitDesc facet_desc;
+    facet_desc.device = g_device;
+    facet_desc.context = g_context;
+    if (!facet::Init(facet_desc)) {
+        SAM_LOG_ERROR("facet::Init failed; the UI draws with Dear ImGui defaults");
+    }
+    sam::ui::fonts::attach_fallbacks();
+
+    // The window is still hidden: read the ini file now (Dear ImGui would only read it in the
+    // first NewFrame), put the window where it was, then show it.
+    ImGui::LoadIniSettingsFromDisk(io.IniFilename);
+    bool start_maximized = false;
+    const bool placed = restore_placement(
+        hwnd, std::clamp(state.settings.ui_scale, sam::app::kUiScaleMin, sam::app::kUiScaleMax), &start_maximized);
+    if (start_minimized) {
+        ShowWindow(hwnd, SW_SHOWMINNOACTIVE);
+    } else if (placed && start_maximized) {
+        ShowWindow(hwnd, SW_SHOWMAXIMIZED);
+    } else {
+        ShowWindow(hwnd, SW_SHOW);
+        ShowWindow(hwnd, SW_SHOWNORMAL);
+    }
+    remember_restored_rect(hwnd);
 
     sam::ui::icons::load(g_device);
     sam::ui::widgets::avatar_cache::init(g_device);
@@ -579,10 +738,6 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmd_line, int) {
 
     sam::time_aligner::start();
     sam::app::job_pump::start_workers(4);
-
-    sam::app::AppState state;
-    state.is_elevated = sam::platform::process::is_elevated();
-    state.load_settings();
 
     const sam::app::VaultResolution vault_res = sam::app::init_vaults(state, true);
 
@@ -684,9 +839,12 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmd_line, int) {
             create_render_target();
         }
 
+        if (facet::DpiScale() != g_dpi_scale) facet::SetDpiScale(g_dpi_scale);
+
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
+        facet::NewFrame();
 
         {
             const bool had_input =
@@ -756,8 +914,10 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmd_line, int) {
         }
         sam::ui::draw(state);
 
+        facet::EndFrame();
         ImGui::Render();
-        const float bg[4] = {0.035F, 0.035F, 0.035F, 1.0F};
+        const ImVec4& clear = facet::T().colors.bg;
+        const float bg[4] = {clear.x, clear.y, clear.z, 1.0F};
         g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
         g_context->ClearRenderTargetView(g_rtv, bg);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
@@ -798,7 +958,12 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmd_line, int) {
     sam::ui::widgets::rank_image::shutdown();
     sam::ui::widgets::avatar_cache::shutdown();
     sam::ui::icons::shutdown();
+    // The placement and Facet's widget state go to the ini file while Facet's ini handler still
+    // exists (facet::Shutdown removes it, and DestroyContext would save without it).
+    save_placement(hwnd);
+    ImGui::SaveIniSettingsToDisk(io.IniFilename);
     g_imgui_ready = false;
+    facet::Shutdown();
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();

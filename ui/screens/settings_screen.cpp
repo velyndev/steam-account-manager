@@ -1,843 +1,373 @@
 #include "ui/screens/settings_screen.hpp"
 
-#include <array>
-#include <cstdint>
-#include <cstdio>
-#include <filesystem>
+#include <algorithm>
+#include <cstring>
 #include <string>
-#include <system_error>
-
-#include <windows.h>
+#include <vector>
 
 #include <imgui.h>
 
-#include "app/app_paths.hpp"
-#include "core/cs2_config/workshop_block.hpp"
-#include "core/log.hpp"
+#include <facet/core/color.h>
+#include <facet/core/icons.h>
+#include <facet/core/input.h>
+#include <facet/core/layout.h>
+#include <facet/core/scale.h>
+#include <facet/core/theme.h>
+#include <facet/core/text.h>
+#include <facet/widgets/composites.h>
+#include <facet/widgets/containers.h>
+#include <facet/widgets/display.h>
+#include <facet/widgets/inputs.h>
+#include <facet/widgets/layout.h>
+#include <facet/widgets/lists.h>
+#include <facet/widgets/navigation.h>
+#include <facet/widgets/overlays.h>
+
 #include "platform/paths.hpp"
-#include "platform/process.hpp"
-#include "platform/window_affinity.hpp"
-#include "ui/fonts.hpp"
-#include "ui/screens/settings_sections.hpp"
-#include "ui/theme.hpp"
-#include "ui/util.hpp"
+#include "ui/icons.hpp"
+#include "ui/kit/feedback.hpp"
+#include "ui/kit/navigation.hpp"
+#include "ui/kit/page.hpp"
+#include "ui/kit/transient.hpp"
+#include "ui/screens/settings/capture_hooks.hpp"
+#include "ui/screens/settings/categories.hpp"
 
 namespace sam::ui::screens {
 
 namespace {
 
-void global_badge() {
-    ImGui::SameLine();
-    ImGui::TextDisabled("(global)");
-    hover_tooltip("Applies to every vault, not just this one.");
-}
-
-void draw_clipboard_lock_section(app::AppState& state) {
-    separator_text("Clipboard & auto-lock");
-    ImGui::SetNextItemWidth(200);
-    ImGui::SliderInt("Clipboard auto-clear (s)", &state.settings.clipboard_clear_seconds, 10, 120);
-    hover_tooltip("Wipes copied passwords and codes from the clipboard after this long.");
-    ImGui::SetNextItemWidth(200);
-    ImGui::SliderInt("Auto-lock (minutes)", &state.settings.auto_lock_minutes, 0, 240);
-    hover_tooltip("Re-locks the vault after this long idle. 0 disables it.");
-}
-
-void draw_updates_section(app::AppState& state) {
-    separator_text("Updates");
-    ImGui::Checkbox("Check for updates on launch", &state.settings.check_updates_on_launch);
-    hover_tooltip("Checks GitHub for a newer release at startup. No account data is sent.");
-    global_badge();
-}
-
-void draw_appearance_section(app::AppState& state) {
-    {
-        int view_idx = static_cast<int>(state.settings.accounts_view);
-        ImGui::SetNextItemWidth(200);
-        if (styled_combo("Accounts view", &view_idx, "Grid\0List\0")) {
-            state.settings.accounts_view = (view_idx == 1)
-                ? app::AccountsViewMode::List
-                : app::AccountsViewMode::Grid;
-        }
-        hover_tooltip("Grid: card grid. List: two-pane layout with groups on the left.");
-    }
-    ImGui::Checkbox("Hide account notes", &state.settings.hide_notes);
-    hover_tooltip("Hides notes everywhere. They stay editable on the add/edit screen.");
-}
-
-void draw_safe_mode_section(app::AppState& state) {
-    separator_text("Safe mode");
-
-    bool on = state.settings.safe_mode;
-    if (ImGui::Checkbox("Safe mode", &on)) {
-        if (on) {
-            state.settings.safe_mode = true;
-            state.save_settings();
-        } else {
-
-            ImGui::OpenPopup("Disable safe mode?");
-        }
-    }
-    hover_tooltip("Hides and disables the HWID spoofer, the external CS2 loaders and the "
-                  "tracer cleaner. Nothing is erased; turning it off restores everything. "
-                  "Per-vault.");
-
-    if (state.settings.safe_mode) {
-        ImGui::PushStyleColor(ImGuiCol_Text, theme::warning());
-        ImGui::TextWrapped("On. No launch injects the HWID spoofer or runs an external "
-                           "loader, and the tracer cleaner never runs, whatever they are "
-                           "set to.");
-        ImGui::PopStyleColor();
-    }
-
-    if (begin_styled_modal("Disable safe mode?")) {
-        ImGui::TextWrapped("This brings back the HWID spoofer, the external CS2 loaders "
-                           "(gamesense, luminary) and the tracer cleaner, along with every "
-                           "account's stored HWID profile and launch method. Launching an "
-                           "account will inject and run them again, and any cleaner trigger "
-                           "you armed will start firing.");
-        ImGui::Spacing();
-        if (action_button("Cancel", ImVec2(110, 0))) {
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SameLine();
-        if (action_button("Disable safe mode", ImVec2(160, 0))) {
-            state.settings.safe_mode = false;
-            state.save_settings();
-            ImGui::CloseCurrentPopup();
-        }
-        end_styled_modal();
-    }
-}
-
-void draw_privacy_section(app::AppState& state) {
-    separator_text("Privacy");
-    if (ImGui::Checkbox("Privacy mode - hide login names", &state.settings.privacy_mode)) {
-
-        state.clear_session_secrets();
-    }
-    hover_tooltip("Replaces login names with <hidden>. Click one to reveal it until the "
-                  "vault locks.");
-
-    if (ImGui::Checkbox("Hide from screen capture (streamproof)", &state.settings.streamproof)) {
-        platform::set_capture_excluded(state.main_hwnd, state.settings.streamproof);
-        state.save_settings();
-    }
-    hover_tooltip("Capture software (OBS, Discord) records a blank where the window is. "
-                  "Still visible on your monitor. Needs Windows 10 2004 or newer.");
-}
-
-void draw_steam_login_section(app::AppState& state) {
-    separator_text("Steam login");
-
-    {
-        int method = static_cast<int>(state.settings.sign_in_method);
-        ImGui::SetNextItemWidth(200);
-        if (styled_combo("Sign-in method", &method,
-                         "Sign-in driver\0Token injection\0")) {
-            state.settings.sign_in_method = static_cast<app::SignInMethod>(method);
-            state.save_settings();
-        }
-        hover_tooltip("Driver types into Steam's login window. Token injection skips the "
-                      "window, but needs a stored password to mint the token once.");
-    }
-
-    if (ImGui::Checkbox("Disable Steam Cloud on login",
-                        &state.settings.disable_cloud_on_login)) {
-        state.save_settings();
-    }
-    hover_tooltip("Turns Steam Cloud off for every account you launch. This is an "
-                  "account-wide Steam setting, and it is not put back.");
-
-    if (ImGui::Checkbox("Disable new-release news on login",
-                        &state.settings.disable_news_on_login)) {
-        state.save_settings();
-    }
-    hover_tooltip("Turns off new-release notifications for every account you launch. "
-                  "Not put back afterwards.");
-
-    if (ImGui::Checkbox("Sign in as Invisible", &state.settings.login_invisible)) {
-        state.save_settings();
-    }
-    hover_tooltip("Sets friends status to Invisible before sign-in, so switching never "
-                  "flashes an account online. Not put back afterwards.");
-
-    if (ImGui::Checkbox("Disable Remote Play on login",
-                        &state.settings.disable_remote_play_on_login)) {
-        state.save_settings();
-    }
-    hover_tooltip("Turns off Remote Play for every account you launch. Not put back "
-                  "afterwards.");
-
-    if (ImGui::Checkbox("Disable CS2 workshop map downloads on login",
-                        &state.settings.disable_workshop_on_login)) {
-        state.save_settings();
-    }
-    hover_tooltip("Stops subscribed workshop maps downloading, so CS2 starts straight "
-                  "away. Subscriptions are kept and restored on the next launch.");
-
-    if (ImGui::Button("Re-enable Steam workshop downloads")) {
-        const auto r = cs2_config::clear_all_workshop_blocks();
-        SAM_LOG_INFO("settings: clear workshop blocks -> ok={} ({})", r.ok, r.message);
-    }
-    hover_tooltip("Restores every account's workshop subscriptions on this PC.");
-
-    {
-        const bool token_mode =
-            state.settings.sign_in_method == app::SignInMethod::TokenInject;
-        ImGui::BeginDisabled(token_mode);
-        if (ImGui::Checkbox("Remember password on login",
-                            &state.settings.remember_password_on_login)) {
-            state.save_settings();
-        }
-        hover_tooltip("Ticks Steam's \"Remember me\" box so the session is kept. "
-                      "Ignored by token injection, which always needs one.");
-        ImGui::EndDisabled();
-    }
-}
-
-void draw_cs2_gc_section(app::AppState& state) {
-    separator_text("CS2 Game Coordinator");
-    ImGui::Checkbox("Enable CS2 tab", &state.settings.cs2_gc.enabled);
-    hover_tooltip("Shows the CS2 tab and allows a live Game Coordinator connection for "
-                  "inventory and weekly drops.");
-    ImGui::BeginDisabled(!state.settings.cs2_gc.enabled);
-    ImGui::Checkbox("Show weekly drop card", &state.settings.cs2_gc.show_weekly_drop);
-    ImGui::Checkbox("Show weekly mission card", &state.settings.cs2_gc.show_weekly_mission);
-    ImGui::Checkbox("Show inventory card", &state.settings.cs2_gc.show_inventory);
-    ImGui::Checkbox("Show storage units card", &state.settings.cs2_gc.show_storage_units);
-    ImGui::Checkbox("Mark weekly drop claimed automatically",
-                    &state.settings.cs2_gc.auto_mark_claimed);
-    hover_tooltip("Keeps the weekly-drop marker in step with the GC while connected. "
-                  "Off leaves it to the manual \"Mark claimed\" action.");
-    ImGui::Checkbox("Auto-refresh on startup",
-                    &state.settings.cs2_gc.auto_pull_on_startup);
-    hover_tooltip("Runs Refresh all and Refresh GC at startup, signing in where needed. "
-                  "Skips anything still cached. External funds are never fetched.");
-    ImGui::SetNextItemWidth(200);
-    ImGui::SliderInt("GC cache duration (hours)", &state.settings.cs2_gc.cache_hours, 1, 24);
-    hover_tooltip("How long GC data stays cached before auto-pull refreshes it.");
-    ImGui::EndDisabled();
-}
-
-void draw_account_info_section(app::AppState& state) {
-    separator_text("Account info to display");
-
-    if (ImGui::BeginTable("##info-grid", 3, ImGuiTableFlags_SizingStretchSame)) {
-        const char* kWebApi = "Needs a Steam Web API key, set under Network & Data.";
-        const char* kGcpd   = "Needs the GCPD scraper, enabled under Network & Data.";
-        const char* kGc     = "Needs the CS2 Game Coordinator, enabled under CS2.";
-
-        ImGui::TableNextColumn(); ImGui::Checkbox("VAC ban",            &state.settings.info.show_vac);
-        hover_tooltip(kWebApi);
-        ImGui::TableNextColumn(); ImGui::Checkbox("Game ban",           &state.settings.info.show_game_ban);
-        hover_tooltip(kWebApi);
-        ImGui::TableNextColumn(); ImGui::Checkbox("Community ban",      &state.settings.info.show_community_ban);
-        hover_tooltip(kWebApi);
-
-        ImGui::TableNextColumn(); ImGui::Checkbox("Trade ban",          &state.settings.info.show_trade_ban);
-        hover_tooltip(kWebApi);
-        ImGui::TableNextColumn(); ImGui::Checkbox("Steam level",        &state.settings.info.show_steam_level);
-        hover_tooltip(kWebApi);
-        ImGui::TableNextColumn(); ImGui::Checkbox("Owned games count",  &state.settings.info.show_owned_games);
-        hover_tooltip(kWebApi);
-        ImGui::TableNextColumn(); ImGui::Checkbox("Steam ID",           &state.settings.info.show_steam_id);
-
-        ImGui::TableNextColumn(); ImGui::Checkbox("Premier rating",     &state.settings.info.show_premier);
-        hover_tooltip(kGcpd);
-        ImGui::TableNextColumn(); ImGui::Checkbox("Wingman rank",       &state.settings.info.show_wingman);
-        hover_tooltip(kGcpd);
-
-        ImGui::TableNextColumn(); ImGui::Checkbox("Prime status",       &state.settings.info.show_prime);
-        hover_tooltip("Inferred from CS2 level and XP, so it needs the GCPD scraper or the GC.");
-        ImGui::TableNextColumn(); ImGui::Checkbox("VAC-Live indicator", &state.settings.info.show_vac_live);
-        hover_tooltip("VAC ban seen by the CS2 Game Coordinator, usually before the Web API.");
-        ImGui::TableNextColumn(); ImGui::Checkbox("Cooldown countdown", &state.settings.info.show_cooldown);
-        hover_tooltip(kGc);
-        ImGui::TableNextColumn(); ImGui::Checkbox("Weekly XP drop",     &state.settings.info.show_weekly_drop);
-        hover_tooltip(kGc);
-        ImGui::TableNextColumn(); ImGui::Checkbox("External funds",     &state.settings.info.show_external_funds);
-        hover_tooltip("Filled by Refresh spent on the accounts toolbar, which signs in to "
-                      "each account.");
-
-        ImGui::EndTable();
-    }
-}
-
-void draw_integration_section(app::AppState& state) {
-    separator_text("Integration");
-    std::array<char, 64> key_buf{};
-    std::snprintf(key_buf.data(), key_buf.size(), "%s", state.settings.web_api_key.c_str());
-    ImGui::SetNextItemWidth(300);
-    if (ImGui::InputText("Steam Web API key", key_buf.data(), key_buf.size(),
-                          ImGuiInputTextFlags_Password)) {
-        state.settings.web_api_key = key_buf.data();
-    }
-    ImGui::SameLine();
-    if (action_button("Get key")) {
-        open_url("https://steamcommunity.com/dev/apikey");
-    }
-    hover_tooltip("Needed for bans, level and owned games. Stored encrypted with the vault.");
-    ImGui::Checkbox("Refresh on launch", &state.settings.refresh_on_launch);
-    hover_tooltip("Re-queries the Steam Web API for every account at startup.");
-    ImGui::Checkbox("GCPD scraper", &state.settings.gcpd_enabled);
-    hover_tooltip("Scrapes Premier rating, Wingman rank, Prime and cooldown. "
-                  "Needs a full login (Add Account > Full Login).");
-
-    ImGui::SetNextItemWidth(200);
-    ImGui::SliderInt("Steam data cache (hours)", &state.settings.steam_cache_hours, 1, 24);
-    hover_tooltip("Batch refreshes skip accounts newer than this. A manual single-account "
-                  "Refresh always forces.");
-
-    separator_text("Auto-refresh");
-    ImGui::Checkbox("Auto-refresh while open", &state.settings.auto_refresh_enabled);
-    hover_tooltip("Refreshes accounts whose cache has expired, on a timer. Never runs "
-                  "the funds or GCPD scrapes.");
-    ImGui::BeginDisabled(!state.settings.auto_refresh_enabled);
-    ImGui::SetNextItemWidth(200);
-    ImGui::SliderInt("Refresh interval (minutes)", &state.settings.auto_refresh_minutes, 10, 720);
-    ImGui::EndDisabled();
-}
-
-void restart_elevated(app::AppState& state) {
-    if (platform::process::relaunch_elevated(L"--switch")) {
-        PostMessageW(state.main_hwnd, WM_CLOSE, 0, 0);
-    }
-}
-
-void draw_admin_section(app::AppState& state) {
-    separator_text("Administrator");
-
-    if (ImGui::Checkbox("Run as administrator", &state.settings.run_as_admin)) {
-        state.save_settings();
-        if (state.settings.run_as_admin && !state.is_elevated) {
-            ImGui::OpenPopup("Restart as administrator?");
-        } else if (!state.settings.run_as_admin && state.is_elevated) {
-            ImGui::OpenPopup("Close to drop administrator?");
-        }
-    }
-    hover_tooltip("Shows a UAC prompt at every launch. Only the logon task below and an "
-                  "elevated Steam need it; everything else works either way.");
-    global_badge();
-
-    if (state.settings.run_as_admin && !state.is_elevated) {
-        ImGui::PushStyleColor(ImGuiCol_Text, theme::warning());
-        ImGui::TextWrapped("Not running as administrator this session.");
-        ImGui::PopStyleColor();
-        if (action_button("Restart as administrator", ImVec2(210, 0))) restart_elevated(state);
-    }
-
-    if (begin_styled_modal("Restart as administrator?")) {
-        ImGui::TextWrapped("A process can't gain administrator rights while it's running, so "
-                           "this takes effect on the next launch. Restart now?");
-        ImGui::Spacing();
-        if (action_button("Later", ImVec2(110, 0))) ImGui::CloseCurrentPopup();
-        ImGui::SameLine();
-        if (action_button("Restart now", ImVec2(140, 0))) {
-            ImGui::CloseCurrentPopup();
-            restart_elevated(state);
-        }
-        end_styled_modal();
-    }
-
-    if (begin_styled_modal("Close to drop administrator?")) {
-        ImGui::TextWrapped("This session stays elevated. An elevated process can't restart "
-                           "itself as a normal one. Close the app and open it again, and it "
-                           "will start without the UAC prompt.");
-        ImGui::Spacing();
-        if (action_button("Keep it open", ImVec2(140, 0))) ImGui::CloseCurrentPopup();
-        ImGui::SameLine();
-        if (action_button("Close now", ImVec2(110, 0))) {
-            ImGui::CloseCurrentPopup();
-            PostMessageW(state.main_hwnd, WM_CLOSE, 0, 0);
-        }
-        end_styled_modal();
-    }
-}
-
-bool s_logon_task_ok = true;
-
-void draw_startup_section(app::AppState& state) {
-    separator_text("Startup");
-
-    ImGui::BeginDisabled(!state.is_elevated);
-
-    int mode = static_cast<int>(state.settings.logon_action);
-    ImGui::SetNextItemWidth(260);
-    if (styled_combo("At Windows logon", &mode,
-                     "Do nothing\0Refresh accounts in the background\0Open the app\0")) {
-        const auto prev = state.settings.logon_action;
-        state.settings.logon_action = static_cast<app::LogonAction>(mode);
-
-        if (state.settings.logon_action == app::LogonAction::BackgroundRefresh) {
-
-            state.settings.refresh_on_launch = true;
-            if (settings_detail::write_master_pw_cache(state))
-                state.settings.remember_master_password = true;
-            if (!state.settings.remember_master_password) {
-                SAM_LOG_ERROR("startup: background refresh needs the master-password cache");
-                state.settings.logon_action = prev;
-            } else if (state.vault_registry.vaults.size() > 1) {
-
-                app::set_auto_open(state.vault_registry, platform::active_vault_id());
-            }
-        }
-        s_logon_task_ok = state.sync_logon_task();
-        state.save_settings();
-    }
-    hover_tooltip("Background refresh runs hidden at logon, notifies on new bans or "
-                  "cooldowns, then exits. Open the app launches the full window.");
-    global_badge();
-
-    if (state.settings.logon_action == app::LogonAction::OpenApp) {
-        if (ImGui::Checkbox("Start minimized", &state.settings.start_minimized)) {
-
-            s_logon_task_ok = state.sync_logon_task();
-            state.save_settings();
-        }
-        hover_tooltip("Only at logon. Manual launches always open normally.");
-        global_badge();
-    }
-
-    if (state.settings.logon_action == app::LogonAction::BackgroundRefresh) {
-        ImGui::PushStyleColor(ImGuiCol_Text, theme::warning());
-        ImGui::TextWrapped("Caches your master password via Windows DPAPI so the background run "
-                           "can open the vault unattended. Anyone signed in as you on this PC can "
-                           "then open the vault without the password.");
-        ImGui::PopStyleColor();
-    }
-
-    ImGui::EndDisabled();
-
-    if (!state.is_elevated) {
-        ImGui::TextDisabled("Requires administrator.");
-        ImGui::SameLine();
-        if (action_button("Restart as administrator", ImVec2(210, 0))) restart_elevated(state);
-    } else if (!s_logon_task_ok) {
-        ImGui::PushStyleColor(ImGuiCol_Text, theme::danger());
-        ImGui::TextWrapped("Windows Task Scheduler refused the logon task. See the log for "
-                           "the error code.");
-        ImGui::PopStyleColor();
-    }
-}
-
-void draw_notifications_section(app::AppState& state) {
-    ImGui::Checkbox("Detect bans and cooldown changes", &state.settings.notifications.enabled);
-    hover_tooltip("Each refresh compares against the previous snapshot. The first refresh "
-                  "after adding an account only records the baseline.");
-    ImGui::BeginDisabled(!state.settings.notifications.enabled);
-    if (ImGui::BeginTable("##notif-surface", 3, ImGuiTableFlags_SizingStretchSame)) {
-        ImGui::TableNextColumn();
-        ImGui::Checkbox("Show badge on cards / rows",
-                        &state.settings.notifications.surface_in_card);
-        ImGui::TableNextColumn();
-        ImGui::Checkbox("Show in-app toasts",
-                        &state.settings.notifications.surface_toast);
-        ImGui::TableNextColumn();
-        ImGui::Checkbox("Show Windows notifications",
-                        &state.settings.notifications.surface_windows_notification);
-        hover_tooltip("Tray balloon for new bans and cooldowns. Suppressed while this "
-                      "window is focused.");
-        ImGui::EndTable();
-    }
-    ImGui::Spacing();
-    ImGui::TextDisabled("Notify on");
-    if (ImGui::BeginTable("##notif-kinds", 2, ImGuiTableFlags_SizingStretchSame)) {
-        ImGui::TableNextColumn(); ImGui::Checkbox("VAC ban",        &state.settings.notifications.on_new_vac_ban);
-        ImGui::TableNextColumn(); ImGui::Checkbox("Game ban",       &state.settings.notifications.on_new_game_ban);
-        ImGui::TableNextColumn(); ImGui::Checkbox("Community ban",  &state.settings.notifications.on_new_community_ban);
-        ImGui::TableNextColumn(); ImGui::Checkbox("Trade ban",      &state.settings.notifications.on_new_trade_ban);
-        ImGui::TableNextColumn(); ImGui::Checkbox("VAC-Live",       &state.settings.notifications.on_new_vac_live);
-        ImGui::TableNextColumn(); ImGui::Checkbox("Ban removed",    &state.settings.notifications.on_ban_removed);
-        ImGui::TableNextColumn(); ImGui::Checkbox("Cooldown started", &state.settings.notifications.on_cooldown_started);
-        ImGui::TableNextColumn(); ImGui::Checkbox("Cooldown ended",   &state.settings.notifications.on_cooldown_ended);
-        ImGui::EndTable();
-    }
-    ImGui::Spacing();
-    ImGui::SetNextItemWidth(180);
-    ImGui::SliderInt("Toast duration (s)",
-                     &state.settings.notifications.toast_duration_seconds, 2, 30);
-    ImGui::SetNextItemWidth(180);
-    ImGui::SliderInt("Coalesce above N accounts",
-                     &state.settings.notifications.coalesce_threshold, 2, 50);
-    hover_tooltip("Above this many changes in one refresh, a single summary toast "
-                  "replaces the per-account ones. Badges still appear.");
-    ImGui::SetNextItemWidth(180);
-    ImGui::SliderInt("Keep history (days)",
-                     &state.settings.notifications.retention_days, 1, 365);
-    ImGui::EndDisabled();
-}
-
-void draw_list_view_section(app::AppState& state) {
-    separator_text("List view");
-    ImGui::Checkbox("Show cooldown marker on rows",
-                    &state.settings.list_view.show_cooldown_marker);
-    hover_tooltip("Orange exclamation mark on rows currently on a CS2 cooldown.");
-    ImGui::Checkbox("Show unread-event badge on rows",
-                    &state.settings.list_view.show_unread_badge);
-    hover_tooltip("Red exclamation mark on rows with unread ban or cooldown events.");
-    ImGui::Checkbox("Show weekly-drop marker on rows",
-                    &state.settings.list_view.show_weekly_drop_marker);
-    hover_tooltip("Green checkmark on rows whose weekly XP drop is claimed.");
-    ImGui::Checkbox("Hide account name in list",
-                    &state.settings.list_view.hide_account_name);
-    hover_tooltip("Hides the login name from rows. The persona name still shows.");
-}
-
-void draw_vault_section(app::AppState& state) {
-    separator_text("Vault");
-    {
-        const bool prev = state.settings.remember_master_password;
-        if (ImGui::Checkbox("Skip master-password prompt on launch (DPAPI)",
-                            &state.settings.remember_master_password)) {
-            if (state.settings.remember_master_password && !prev) {
-
-                if (!settings_detail::write_master_pw_cache(state)) {
-                    state.settings.remember_master_password = false;
-                }
-            } else if (!state.settings.remember_master_password && prev) {
-
-                std::error_code ec;
-                std::filesystem::remove(app::master_pw_cache_path(), ec);
-                SAM_LOG_INFO("auto-unlock: DPAPI cache removed");
-            }
-            state.save_settings();
-        }
-    }
-    hover_tooltip("Opens the vault automatically at launch. Anyone signed in as you on "
-                  "this PC can then open it without the password.");
-    global_badge();
-}
-
-bool category_item(const char* label, bool selected, float width) {
-    const ImVec2 size{width, 32.0F};
-    const ImVec2 cursor = ImGui::GetCursorScreenPos();
-    ImGui::PushID(label);
-    ImGui::InvisibleButton("##cat", size);
-    const bool pressed = ImGui::IsItemActivated();
-    const bool hovered = ImGui::IsItemHovered();
-    ImGui::PopID();
-
-    auto* draw = ImGui::GetWindowDrawList();
-    if (selected) {
-        draw->AddRectFilled(cursor, ImVec2(cursor.x + size.x, cursor.y + size.y),
-                            ImColor(255, 255, 255, 14), 6.0F);
-        const ImVec4 accent = theme::accent();
-        draw->AddRectFilled(ImVec2(cursor.x, cursor.y + 6.0F),
-                            ImVec2(cursor.x + 3.0F, cursor.y + size.y - 6.0F),
-                            ImColor(accent.x, accent.y, accent.z, 1.0F), 1.5F);
-    } else if (hovered) {
-        draw->AddRectFilled(cursor, ImVec2(cursor.x + size.x, cursor.y + size.y),
-                            ImColor(255, 255, 255, 8), 6.0F);
-    }
-
-    const ImVec4 col = (selected || hovered) ? theme::text() : theme::dim_text();
-    draw->AddText(ImVec2(cursor.x + 14.0F, cursor.y + 8.0F), ImColor(col), label);
-    return pressed;
-}
-
-void render_general(app::AppState& state) {
-    draw_updates_section(state);
-    ImGui::Spacing();
-    draw_admin_section(state);
-    ImGui::Spacing();
-    draw_startup_section(state);
-}
-
-void render_security(app::AppState& state) {
-    draw_safe_mode_section(state);
-    ImGui::Spacing();
-    draw_clipboard_lock_section(state);
-    ImGui::Spacing();
-    draw_privacy_section(state);
-}
-
-void render_appearance(app::AppState& state) {
-    draw_appearance_section(state);
-    ImGui::Spacing();
-    draw_account_info_section(state);
-    ImGui::Spacing();
-    draw_list_view_section(state);
-}
-
-void render_notifications(app::AppState& state) {
-    draw_notifications_section(state);
-}
-
-void render_steam_guard(app::AppState& state) {
-    settings_detail::draw_authenticator_section(state);
-    ImGui::Spacing();
-    settings_detail::draw_confirmations_section(state);
-}
-
-void render_launch_steam(app::AppState& state) {
-    draw_steam_login_section(state);
-    ImGui::Spacing();
-    settings_detail::draw_cs2_config_section(state);
-    if (state.settings.safe_mode) return;
-    ImGui::Spacing();
-    settings_detail::draw_gamesense_section(state);
-    ImGui::Spacing();
-    settings_detail::draw_luminary_section(state);
-}
-
-void render_cleaner(app::AppState& state) {
-    settings_detail::draw_cleaner_section(state);
-}
-
-void render_network_data(app::AppState& state) {
-    draw_integration_section(state);
-    ImGui::Spacing();
-    settings_detail::draw_proxy_section(state);
-}
-
-void render_cs2(app::AppState& state) {
-    draw_cs2_gc_section(state);
-}
-
-void render_hwid(app::AppState& state) {
-    if (ImGui::Checkbox("Always spoof HWID", &state.settings.hwid.always_spoof))
-        state.save_settings();
-    hover_tooltip("Spoofs hardware identifiers for every account on launch. "
-                  "Exclude individual accounts from the right-click menu.");
-
-    ImGui::Spacing();
-    separator_text("Components");
-
-    auto& mask = state.settings.hwid.component_mask;
-    auto flag_checkbox = [&](const char* label, std::uint32_t bit) {
-        bool on = (mask & bit) != 0;
-        if (ImGui::Checkbox(label, &on)) {
-            if (on) mask |= bit;
-            else    mask &= ~bit;
-            state.save_settings();
-        }
-    };
-
-    const float grid_w = ImGui::GetContentRegionAvail().x - kContentPaddingX;
-    if (ImGui::BeginTable("##hwid-comp-grid", 3, ImGuiTableFlags_SizingStretchSame,
-            ImVec2(grid_w, 0.0f))) {
-        ImGui::TableNextColumn(); flag_checkbox("Machine GUID",  0x001u);
-        ImGui::TableNextColumn(); flag_checkbox("MAC address",   0x002u);
-        ImGui::TableNextColumn(); flag_checkbox("Disk serial",   0x004u);
-
-        ImGui::TableNextColumn(); flag_checkbox("PC name",       0x008u);
-        ImGui::TableNextColumn(); flag_checkbox("GPU",           0x010u);
-        ImGui::TableNextColumn(); flag_checkbox("Motherboard",   0x020u);
-
-        ImGui::TableNextColumn(); flag_checkbox("RAM",           0x040u);
-        ImGui::TableNextColumn(); flag_checkbox("Monitor",       0x080u);
-        ImGui::TableNextColumn(); flag_checkbox("Storage",       0x100u);
-
-        ImGui::TableNextColumn(); flag_checkbox("Sound card",    0x200u);
-
-        ImGui::EndTable();
-    }
-
-    ImGui::Spacing();
-    separator_text("Hardware comparison");
-
-    const auto* last_acc = state.last_hwid_account_id.empty()
-        ? nullptr : state.find_account(state.last_hwid_account_id);
-    if (!last_acc || !last_acc->hwid.has_value()) {
-        ImGui::TextDisabled("No account has been spoofed this session.");
-    } else {
-        const auto& real = state.real_hardware;
-        const auto& fake = *last_acc->hwid;
-
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.055F, 0.055F, 0.055F, 1.0F));
-        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0F);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16, 14));
-
-        if (ImGui::BeginChild("##hwid-cmp-card", ImVec2(grid_w, 0),
-                ImGuiChildFlags_AutoResizeY)) {
-
-            const auto dim = theme::dim_text();
-
-            if (ImGui::BeginTable("##hwid-cmp", 3,
-                    ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX,
-                    ImVec2(-1, 0.0f))) {
-                ImGui::TableSetupColumn("##comp", ImGuiTableColumnFlags_WidthFixed, 110.0f);
-                ImGui::TableSetupColumn("##real");
-                ImGui::TableSetupColumn("##spoofed");
-
-                ImGui::TableNextRow();
-                ImGui::TableNextColumn();
-                ImGui::PushStyleColor(ImGuiCol_Text, dim);
-                ImGui::TextUnformatted("Component");
-                ImGui::TableNextColumn(); ImGui::TextUnformatted("Real");
-                ImGui::TableNextColumn(); ImGui::TextUnformatted("Spoofed");
-                ImGui::PopStyleColor();
-
-                auto row = [&](const char* label, const std::string& r, const std::string& s) {
-                    ImGui::TableNextRow();
-                    ImGui::TableNextColumn();
-                    ImGui::PushStyleColor(ImGuiCol_Text, dim);
-                    ImGui::TextUnformatted(label);
-                    ImGui::PopStyleColor();
-                    ImGui::TableNextColumn(); ImGui::TextUnformatted(r.c_str());
-                    ImGui::TableNextColumn(); ImGui::TextUnformatted(s.c_str());
-                };
-                auto row_int = [&](const char* label, int r, int s) {
-                    ImGui::TableNextRow();
-                    ImGui::TableNextColumn();
-                    ImGui::PushStyleColor(ImGuiCol_Text, dim);
-                    ImGui::TextUnformatted(label);
-                    ImGui::PopStyleColor();
-                    ImGui::TableNextColumn(); ImGui::Text("%d", r);
-                    ImGui::TableNextColumn(); ImGui::Text("%d", s);
-                };
-
-                row("Machine GUID", real.machine_guid, fake.machine_guid);
-                row("MAC address",  real.mac_address,  fake.mac_address);
-                row("Disk serial",  real.disk_serial,  fake.disk_serial);
-                row("PC name",      real.pc_name,      fake.pc_name);
-                row("GPU",          real.gpu_name,      fake.gpu_name);
-                row("Board",        real.board_model,   fake.board_model);
-                row("Board mfr",    real.board_manufacturer, fake.board_manufacturer);
-                row_int("RAM (MB)",     real.ram_mb,        fake.ram_mb);
-                {
-                    ImGui::TableNextRow();
-                    ImGui::TableNextColumn();
-                    ImGui::PushStyleColor(ImGuiCol_Text, dim);
-                    ImGui::TextUnformatted("Monitor");
-                    ImGui::PopStyleColor();
-                    ImGui::TableNextColumn(); ImGui::Text("%dx%d @%dHz", real.monitor_width, real.monitor_height, real.monitor_refresh);
-                    ImGui::TableNextColumn(); ImGui::Text("%dx%d @%dHz", fake.monitor_width, fake.monitor_height, fake.monitor_refresh);
-                }
-                row("Sound card",   real.sound_card,    fake.sound_card);
-                row("Display",      real.display_model, fake.display_model);
-                ImGui::EndTable();
-            }
-        }
-        ImGui::EndChild();
-
-        ImGui::PopStyleVar(2);
-        ImGui::PopStyleColor();
-    }
-}
-
 struct CategoryDef {
-    const char* label;
-    void (*render)(app::AppState&);
-
-    bool unsafe = false;
+    SettingsCategory category;
+    void (*draw)(settings::Page& p);
+    facet::Icon icon;
+    const char* description;  // one line under the category title
 };
 
-void render_vaults(app::AppState& state) {
-    settings_detail::draw_vaults_section(state);
-    ImGui::Spacing();
-    draw_vault_section(state);
-    ImGui::Spacing();
-    settings_detail::draw_storage_section(state);
-}
+// In SettingsCategory order, so a category value indexes it.
+const CategoryDef kDefs[] = {
+    {SettingsCategory::General, &settings::draw_general, facet::Icon("settings"),
+     "Windows logon, administrator rights, the clipboard and auto-lock."},
+    {SettingsCategory::Appearance, &settings::draw_appearance, facet::Icon("palette"),
+     "Theme, accent and size, and what the account views show."},
+    {SettingsCategory::AccountsRefresh, &settings::draw_accounts_refresh, facet::Icon("refresh"),
+     "When account data is fetched and where it comes from."},
+    {SettingsCategory::SteamGuard, &settings::draw_steam_guard, icons::authenticator,
+     "Codes, the copy shortcut, confirmations and auto-approve."},
+    {SettingsCategory::SignInLaunch, &settings::draw_sign_in_launch, facet::Icon("play"),
+     "How accounts sign in and what each launch changes on them."},
+    {SettingsCategory::Cs2, &settings::draw_cs2, icons::crosshair, "The Game Coordinator connection and the CS2 screen."},
+    {SettingsCategory::Trading, &settings::draw_trading, icons::trade, "Sent offers, rate limits and saved trade links."},
+    {SettingsCategory::Notifications, &settings::draw_notifications, facet::Icon("bell"),
+     "Ban and cooldown notices, where they appear and how long they stay."},
+    {SettingsCategory::Network, &settings::draw_network, facet::Icon("link"), "Proxies for the app's own web traffic."},
+    {SettingsCategory::PrivacySecurity, &settings::draw_privacy_security, facet::Icon("eye-off"),
+     "What is hidden on screen, unlocking without the password, and safe mode."},
+    {SettingsCategory::VaultsStorage, &settings::draw_vaults_storage, icons::vault,
+     "Your vaults and where the app keeps its data."},
+    {SettingsCategory::About, &settings::draw_about, facet::Icon("info"), "Version, updates and license."},
+    {SettingsCategory::Cleaner, &settings::draw_cleaner, facet::Icon("trash"), "Deletes what Steam leaves on this PC."},
+    {SettingsCategory::HwidSpoofer, &settings::draw_hwid_spoofer, facet::Icon("monitor"),
+     "Replaces hardware identifiers when an account launches."},
+    {SettingsCategory::Loaders, &settings::draw_loaders, facet::Icon("file"),
+     "Third-party programs run when CS2 starts."},
+};
+static_assert(std::size(kDefs) == static_cast<std::size_t>(kSettingsCategoryCount));
 
-constexpr CategoryDef kCategories[] = {
-    {"General",            render_general},
-    {"Appearance",         render_appearance},
-    {"Notifications",      render_notifications},
-    {"Steam Guard",        render_steam_guard},
-    {"Launch & Steam",     render_launch_steam},
-    {"CS2",                render_cs2},
-    {"Network & Data",     render_network_data},
-    {"Vaults",             render_vaults},
-    {"Security & Privacy", render_security},
-    {"Cleaner",            render_cleaner,  true},
-    {"HWID Spoofer",       render_hwid,     true},
+struct ScreenState {
+    int active = 0;
+    std::string query;
+    std::string last_query;  // the query of the last frame, to notice a change
+    bool detail_open = false;
+    int last_hits[kSettingsCategoryCount] = {};  // per category, from the last frame's search
 };
 
-bool category_hidden(const app::AppState& state, int i) {
-    return state.settings.safe_mode && kCategories[i].unsafe;
+ScreenState& screen_state() {
+    static ScreenState s;
+    return s;
 }
 
-static_assert(IM_ARRAYSIZE(kCategories) == 11);
-static_assert(static_cast<int>(SettingsCategory::NetworkData) == 6);
-static_assert(static_cast<int>(SettingsCategory::Vaults) == 7);
-static_assert(static_cast<int>(SettingsCategory::Cleaner) == 9);
-static_assert(static_cast<int>(SettingsCategory::HwidSpoofer) == 10);
+facet::ShortcutId save_shortcut() {
+    static const facet::ShortcutId id =
+        facet::RegisterShortcut("settings.save", ImGuiMod_Ctrl | ImGuiKey_S, {.label = "Save settings", .group = "Settings"});
+    return id;
+}
+
+bool searching(const ScreenState& st) {
+    return st.query.find_first_not_of(' ') != std::string::npos;
+}
+
+void reset_all() {
+    settings::reset_general_transient();
+    settings::reset_network_transient();
+    settings::reset_privacy_transient();
+    settings::reset_vaults_transient();
+    settings::reset_cleaner_transient();
+}
+
+// Closes every dialog, menu and popover of the screen (brief rule 1 of section 1c). Runs when the
+// category or the search changes, when the user leaves Settings, and through the kit registry on
+// lock, vault change and before each capture scene.
+void reset_transient(app::AppState&) {
+    reset_all();
+}
+
+void select(ScreenState& st, int category) {
+    if (st.active != category) reset_all();
+    st.active = category;
+    st.query.clear();
+    st.detail_open = true;
+}
+
+// One run of category rows as a Facet list without a surface: rows straight on the page with
+// the selection pill, so the list reads as secondary to the app sidebar. `ids` are category
+// values. Returns the category picked by click, Enter or double click, or -1.
+int category_rows(const char* id, const std::vector<int>& ids, ScreenState& st, bool search) {
+    constexpr float kRowHeight = 32.0F;
+    static ImGuiSelectionBasicStorage selection;
+    selection.Clear();
+    int active_row = -1;
+    for (std::size_t r = 0; r < ids.size(); ++r) {
+        if (!search && ids[r] == st.active) active_row = static_cast<int>(r);
+    }
+    if (active_row >= 0) selection.SetItemSelected(selection.AdapterIndexToStorageId(&selection, active_row), true);
+    int picked = -1;
+    // The list is as tall as all its rows, so it never scrolls itself: the list pane around it is
+    // the one container that scrolls. Should the list still find content past its height (an
+    // inset, rounding at a display scale), the overflow it measured is added the next frame.
+    static float overflow[2] = {0.0F, 0.0F};
+    float& extra = overflow[std::strcmp(id, "##categories") == 0 ? 0 : 1];
+    if (facet::BeginVirtualList(id, static_cast<int>(ids.size()), &selection,
+                                {.rowHeight = kRowHeight,
+                                 .height = kRowHeight * static_cast<float>(ids.size()) + 2.0F + extra})) {
+        if (ImGui::GetScrollMaxY() > 0.0F) extra += ImGui::GetScrollMaxY() / facet::Px(1.0F) + 1.0F;        facet::RowRange range;
+        while (facet::NextVisibleRows(&range)) {
+            for (int r = range.first; r < range.last; ++r) {
+                const int index = ids[static_cast<std::size_t>(r)];
+                if (facet::VirtualListRow(r)) picked = index;
+                facet::IconGlyph(kDefs[index].icon, 0.0F, facet::ToU32(facet::T().colors.labelSecondary));
+                ImGui::SameLine();
+                facet::Text(facet::TextStyle::Body, "%s", kit::settings_category_title(kDefs[index].category));
+                if (search && st.last_hits[index] > 0) {
+                    ImGui::SameLine();
+                    settings::align_trailing(28.0F);
+                    facet::CountBadge(st.last_hits[index], {.tone = facet::Tone::Neutral});
+                }
+            }
+        }
+        facet::EndVirtualList();
+    }
+    // A click writes the storage: the row it selected, if it is not the active one, was picked.
+    for (std::size_t r = 0; r < ids.size() && picked < 0; ++r) {
+        const ImGuiID key = selection.AdapterIndexToStorageId(&selection, static_cast<int>(r));
+        if (selection.Contains(key) && static_cast<int>(r) != active_row) picked = ids[r];
+    }
+    return picked;
+}
+
+// Why the search sits above a plain list: the search reaches across every category and its hit
+// counts show on the rows; the list has no surface of its own, so the app sidebar stays the
+// one navigation column with a card behind it.
+void draw_navigation(app::AppState& state, ScreenState& st) {
+    if (facet::SearchField("##settings-search", &st.query, {.placeholder = "Search settings"}) && searching(st)) {
+        st.detail_open = true;
+    }
+    ImGui::Spacing();
+    const bool search = searching(st);
+    std::vector<int> normal;
+    std::vector<int> risky;
+    for (const kit::SettingsCategoryInfo& info : kit::settings_categories()) {
+        if (kit::settings_category_hidden(state, info.category)) continue;
+        (info.unsafe ? risky : normal).push_back(static_cast<int>(info.category));
+    }
+    int picked = category_rows("##categories", normal, st, search);
+    if (!risky.empty()) {
+        ImGui::Spacing();
+        facet::StyledText("Ban risk", {.style = facet::TextStyle::Footnote, .secondary = true});
+        const int risky_pick = category_rows("##risky-categories", risky, st, search);
+        if (risky_pick >= 0) picked = risky_pick;
+    }
+    if (picked >= 0) select(st, picked);
+}
+
+// The narrow form of the navigation (brief rule 7): a dropdown of the categories and the search
+// on one line above the content, which then keeps the whole width.
+void draw_navigation_bar(app::AppState& state, ScreenState& st) {
+    std::vector<int> ids;
+    std::vector<facet::ChoiceItem> items;
+    for (const kit::SettingsCategoryInfo& info : kit::settings_categories()) {
+        if (kit::settings_category_hidden(state, info.category)) continue;
+        const int index = static_cast<int>(info.category);
+        ids.push_back(index);
+        items.push_back({.label = info.title, .icon = kDefs[index].icon, .group = info.unsafe ? "Ban risk" : nullptr});
+    }
+    int current = -1;
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+        if (ids[i] == st.active) current = static_cast<int>(i);
+    }
+    facet::BeginStack("##settings-nav-bar", {.orientation = facet::Orientation::Horizontal});
+    facet::Dropdown("##category", &current, items, {.maxVisibleRows = 16, .width = 240.0F});
+    facet::SearchField("##settings-search", &st.query, {.placeholder = "Search settings", .width = 240.0F});
+    facet::EndStack();
+    if (current >= 0 && ids[static_cast<std::size_t>(current)] != st.active) {
+        select(st, ids[static_cast<std::size_t>(current)]);
+    }
+    ImGui::Spacing();
+}
+
+void draw_unsaved_bar(app::AppState& state) {
+    switch (facet::UnsavedChangesBar("##settings-unsaved", settings::pending_count(state),
+                                     {.applyLabel = "Save", .revertLabel = "Discard", .applyShortcut = save_shortcut()})) {
+        case facet::UnsavedChangesAction::Apply:
+            settings::save_pending(state);
+            kit::show_toast(state, "Settings saved", {.tone = widgets::ToastTone::Success, .id = "settings-saved"});
+            break;
+        case facet::UnsavedChangesAction::Revert: settings::discard_pending(state); break;
+        case facet::UnsavedChangesAction::None: break;
+    }
+}
+
+// Why one draw path for both modes: the rows are the same code in a category and in a search,
+// so a search finds every option exactly as it looks in its category.
+void draw_content(app::AppState& state, ScreenState& st) {
+    static const app::Settings kDefaults{};
+    settings::Page p{.state = state, .s = state.settings, .d = kDefaults};
+    p.searching = searching(st);
+    // A gutter on the right, so the scroll bar never sits on the cards' edge.
+    facet::BeginStack("##settings-content", {.width = std::max(200.0F, facet::AvailableWidthUnits() - 14.0F)});
+    p.label_width = std::clamp(facet::AvailableWidthUnits() * 0.40F, 170.0F, 320.0F);
+
+    static const facet::FilterSettings kWords{};
+    facet::BeginSettingsSearch(settings::kSearchName,
+                               {.filter = p.searching ? st.query.c_str() : nullptr, .filterSettings = &kWords});
+    if (p.searching) {
+        for (const CategoryDef& def : kDefs) {
+            if (kit::settings_category_hidden(state, def.category)) continue;
+            settings::begin_category(p, def.category);
+            def.draw(p);
+            settings::end_category(p);
+        }
+        int total = 0;
+        for (const int h : p.hits) total += h;
+        if (total == 0) {
+            const std::string title = "No settings match \"" + st.query + "\"";
+            if (facet::EmptyState(title.c_str(), {.message = "Try another word, for example proxy, cache, theme or hotkey.",
+                                                  .icon = facet::Icon("search"),
+                                                  .actionLabel = "Clear the search"})) {
+                st.query.clear();
+            }
+        }
+    } else {
+        // The category name is on the selected list row (or in the dropdown), so the pane starts
+        // with its one-line summary: page title, section headings and this read as three levels.
+        const CategoryDef& def = kDefs[st.active];
+        facet::StyledText(def.description, {.style = facet::TextStyle::Footnote, .secondary = true, .wrap = true});
+        ImGui::Dummy(ImVec2(0.0F, facet::Px(facet::T().spacing.sm)));
+        settings::begin_category(p, def.category);
+        def.draw(p);
+        settings::end_category(p);
+    }
+    facet::EndSettingsSearch();
+    facet::EndStack();
+
+#ifdef SAM_UI_CAPTURE
+    if (settings::capture::scrolling_to_end()) ImGui::SetScrollY(ImGui::GetScrollMaxY());
+#endif
+    std::copy(std::begin(p.hits), std::end(p.hits), std::begin(st.last_hits));
+    if (p.open_category >= 0) select(st, p.open_category);
+}
+
+std::string page_context(const app::AppState& state) {
+    const app::VaultInfo* v = state.vault_registry.find(platform::active_vault_id());
+    if (v == nullptr || v->name.empty()) return "Most options belong to the open vault.";
+    return "Most options belong to the vault " + v->name + ".";
+}
 
 }  // namespace
 
-constexpr float kFooterGap = 8.0F;
+SAM_KIT_TRANSIENT_RESET(settings_screen, &reset_transient)
+SAM_KIT_SCREEN_LEAVE(settings_screen, app::Screen::Settings, &reset_transient)
 
+#ifdef SAM_UI_CAPTURE
+namespace settings::capture {
+namespace {
+void (*g_after_baseline)(app::AppState&) = nullptr;
+bool g_scroll_to_end = false;
+}
+void scroll_to_end() {
+    g_scroll_to_end = true;
+}
+bool scrolling_to_end() {
+    return g_scroll_to_end;
+}
+void set_query(const char* query) {
+    screen_state().query = query;
+    screen_state().detail_open = true;
+}
+void after_baseline(void (*fn)(app::AppState& state)) {
+    g_after_baseline = fn;
+}
+void run_after_baseline(app::AppState& state) {
+    if (g_after_baseline == nullptr) return;
+    auto* fn = g_after_baseline;
+    g_after_baseline = nullptr;
+    fn(state);
+}
+}  // namespace settings::capture
+#endif
+
+// Why list and detail when wide: the category list stays in view while the rows change; when
+// narrow the list becomes a dropdown so the rows keep the width.
 void draw_settings(app::AppState& state) {
-    ImGui::TextUnformatted("Settings");
-    ImGui::Spacing();
+    ScreenState& st = screen_state();
+    settings::track_saved_state(state);
 
-    constexpr float kButtonRowHeight = 26.0F;
-    constexpr float kTrailingDummy   = 24.0F;
-    const float footer_reserved = ImGui::GetStyle().ItemSpacing.y * 3.0F +
-                                  kFooterGap + kButtonRowHeight + kTrailingDummy;
-
-    ImGui::BeginChild("##settings-body", ImVec2(0, -footer_reserved),
-                      ImGuiChildFlags_NavFlattened);
-
-    static int active_category = 0;
-
-    if (state.pending_settings_category >= 0 &&
-        state.pending_settings_category < IM_ARRAYSIZE(kCategories) &&
-        !category_hidden(state, state.pending_settings_category)) {
-        active_category = state.pending_settings_category;
+    if (state.pending_settings_category >= 0 && state.pending_settings_category < kSettingsCategoryCount &&
+        !kit::settings_category_hidden(state, static_cast<SettingsCategory>(state.pending_settings_category))) {
+        select(st, state.pending_settings_category);
     }
     state.pending_settings_category = -1;
+    if (kit::settings_category_hidden(state, static_cast<SettingsCategory>(st.active))) st.active = 0;
+#ifdef SAM_UI_CAPTURE
+    // After the scene's category was opened (which closes dialogs), so a scene can open one.
+    settings::capture::run_after_baseline(state);
+    st.last_query = st.query;
+#endif
 
-    if (category_hidden(state, active_category)) active_category = 0;
-    constexpr float kRailWidth = 184.0F;
-
-    ImGui::BeginChild("##settings-cats", ImVec2(kRailWidth, 0), false,
-                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    kit::PageScope page("settings", {.scroll = false});
     {
-
-        auto* draw = ImGui::GetWindowDrawList();
-        const ImVec2 wp = ImGui::GetWindowPos();
-        const float wh = ImGui::GetWindowSize().y;
-        draw->AddLine(ImVec2(wp.x + kRailWidth - 1.0F, wp.y),
-                      ImVec2(wp.x + kRailWidth - 1.0F, wp.y + wh),
-                      ImColor(0.659F, 0.635F, 0.620F, 0.10F));
+        const std::string context = page_context(state);
+        kit::PageHeaderScope header("Settings", {.context = context.c_str()});
     }
-    ImGui::Dummy(ImVec2(0.0F, 4.0F));
-    for (int i = 0; i < IM_ARRAYSIZE(kCategories); ++i) {
-        if (category_hidden(state, i)) continue;
-        ImGui::SetCursorPosX(8.0F);
-        if (category_item(kCategories[i].label, active_category == i, kRailWidth - 16.0F)) {
-            active_category = i;
+
+    if (st.query != st.last_query) {
+        reset_all();
+        st.last_query = st.query;
+    }
+
+    // Narrow (below 900 units: 900x600 and scale 1.5): the categories become a dropdown above the
+    // content; wide: the plain category list beside it.
+    if (facet::AvailableWidthUnits() < 900.0F) {
+        draw_navigation_bar(state, st);
+        if (facet::BeginScrollArea("##settings-narrow")) {
+            draw_content(state, st);
+            draw_unsaved_bar(state);
+            facet::EndScrollArea();
         }
-        ImGui::Dummy(ImVec2(0.0F, 4.0F));
-    }
-    ImGui::EndChild();
-
-    ImGui::SameLine(0.0F, 16.0F);
-
-    ImGui::BeginChild("##settings-content", ImVec2(0, 0), ImGuiChildFlags_NavFlattened);
-
-    ImGui::PushItemWidth(-kContentPaddingX);
-
-    ImFont* tf = fonts::title();
-    if (tf) ImGui::PushFont(tf, 0.0F);
-    ImGui::TextUnformatted(kCategories[active_category].label);
-    if (tf) ImGui::PopFont();
-    ImGui::Spacing();
-
-    kCategories[active_category].render(state);
-
-    ImGui::PopItemWidth();
-    ImGui::EndChild();
-
-    ImGui::EndChild();
-
-    ImGui::Dummy(ImVec2(0.0F, kFooterGap));
-    if (action_button("Save settings", ImVec2(160, 0))) {
-        state.save_settings();
-        ImGui::OpenPopup("Settings saved");
-    }
-
-    if (begin_styled_modal("Settings saved")) {
-        ImGui::TextWrapped("Settings saved.");
-        ImGui::Spacing();
-        if (action_button("OK", ImVec2(80, 0))) {
-            ImGui::CloseCurrentPopup();
+    } else {
+        facet::BeginListDetail("##settings-layout", &st.detail_open, {.listWidth = 236.0F});
+        if (facet::BeginListPane()) {
+            draw_navigation(state, st);
+            facet::EndListPane();
         }
-        end_styled_modal();
+        if (facet::BeginDetailPane()) {
+            draw_content(state, st);
+            draw_unsaved_bar(state);
+            facet::EndDetailPane();
+        }
+        facet::EndListDetail();
     }
+
+    settings::end_frame_tracking(state);
 }
 
 }  // namespace sam::ui::screens

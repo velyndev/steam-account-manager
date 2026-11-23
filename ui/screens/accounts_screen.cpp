@@ -1,767 +1,281 @@
 #include "ui/screens/accounts_screen.hpp"
 
 #include <algorithm>
-#include <array>
-#include <chrono>
 #include <cstdio>
-#include <filesystem>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include <imgui.h>
 
-#include "app/app_paths.hpp"
-#include "app/cleaner_runner.hpp"
-#include "app/gamesense_loader.hpp"
-#include "app/luminary_loader.hpp"
-#include "app/job_pump.hpp"
-#include "core/account_store/filter.hpp"
-#include "core/hwid/hwid_gen.hpp"
-#include "core/launch/cs2_autostart.hpp"
-#include "core/launch/steam_launcher.hpp"
-#include "core/strings.hpp"
-#include "core/profile/edit.hpp"
-#include "core/sda/totp.hpp"
-#include "platform/clipboard.hpp"
-#include "platform/file_dialog.hpp"
-#include "ui/screens/accounts_list_view.hpp"
-#include "ui/screens/add_account_screen.hpp"
+#include <facet/core/layout.h>
+#include <facet/core/scale.h>
+#include <facet/core/text.h>
+#include <facet/core/theme.h>
+#include <facet/widgets/buttons.h>
+#include <facet/widgets/containers.h>
+#include <facet/widgets/display.h>
+#include <facet/widgets/inputs.h>
+#include <facet/widgets/layout.h>
+#include <facet/widgets/lists.h>
+#include <facet/widgets/navigation.h>
+#include <facet/widgets/overlays.h>
+#include <facet/widgets/selection.h>
+
+#include "ui/icons.hpp"
+#include "ui/kit/actions.hpp"
+#include "ui/kit/feedback.hpp"
+#include "ui/kit/format.hpp"
+#include "ui/kit/navigation.hpp"
+#include "ui/kit/page.hpp"
+#include "ui/kit/standing.hpp"
+#include "ui/screens/accounts/accounts_internal.hpp"
 #include "ui/screens/settings_screen.hpp"
-#include "ui/theme.hpp"
-#include "ui/util.hpp"
-#include "ui/widgets/account_card.hpp"
-#include "ui/widgets/bundle_dialogs.hpp"
-#include "ui/widgets/search_bar.hpp"
 
 namespace sam::ui::screens {
 
 namespace {
 
-constexpr float kCardMinWidth = 360.0F;
-constexpr float kGap = 14.0F;
-constexpr float kGridInset = 10.0F;
+using accounts::screen;
+using accounts::ScreenState;
 
-void do_launch(app::AppState& state, core::Account& a, bool use_token) {
+// The labels of core::SortKey, in its persisted order (settings.accounts_sort indexes them).
+const char* const kSortLabels[] = {
+    "Name, A to Z",          "Name, Z to A",      "Login, A to Z",      "Last sign-in",
+    "Recently created",      "Premier rating",    "Steam level",        "CS2 level",
+    "No cooldown first",     "Drop not claimed",  "CS2 XP",             "Spent",
+    "Cooldown ending first",
+};
 
-    const bool safe = state.settings.safe_mode;
-    const core::LoginMethod method = core::effective_login_method(a.login_method, safe);
+void menu_note(const char* text) {
+    facet::StyledText(text, {.style = facet::TextStyle::Footnote, .secondary = true, .wrap = true,
+                             .width = facet::T().overlay.menuMinWidth + 60.0F});
+}
 
-    std::filesystem::path loader;
-    if (method == core::LoginMethod::LaunchCs2Gamesense) {
-        if (auto p = app::gamesense_loader_path()) loader = *p;
+void progress_note(const char* format, int done, int total) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), format, done, total);
+    menu_note(buf);
+}
+
+// Why one Refresh button with a menu: the three refresh kinds differ in cost and in what they
+// need, so each gets its availability and reason in the menu instead of three equal buttons.
+void refresh_menu(app::AppState& state) {
+    ScreenState& s = screen();
+    if (facet::Button("Refresh", {.icon = facet::Icon("chevron-down")})) s.refresh_menu_open = !s.refresh_menu_open;
+    if (!facet::BeginPopover("##refresh-menu", &s.refresh_menu_open,
+                             {.placement = facet::PopoverPlacement::Below, .arrow = false})) {
+        return;
     }
-    std::filesystem::path lum_loader;
-    if (method == core::LoginMethod::LaunchCs2Luminary) {
-        if (auto p = app::luminary_loader_path()) lum_loader = *p;
+    const bool no_key = state.settings.web_api_key.empty();
+    const int total = state.refresh_all_total.load(std::memory_order_relaxed);
+    const int done = state.refresh_all_done.load(std::memory_order_relaxed);
+    ImGui::BeginDisabled(no_key);
+    if (facet::MenuItem("Refresh all accounts", {.icon = facet::Icon("refresh")})) state.refresh_account_data(false, true);
+    ImGui::EndDisabled();
+    if (no_key) {
+        menu_note("Needs a Steam Web API key.");
+        if (facet::MenuItem("Add a Steam Web API key...", {.icon = facet::Icon("settings")})) {
+            kit::open_settings(state, SettingsCategory::NetworkData);
+        }
+    } else if (total > 0 && done < total) {
+        progress_note("Refreshing %d of %d accounts.", done, total);
+    } else {
+        menu_note("Steam data, bans and the CS2 cooldown. Skips what is still up to date.");
     }
 
-    if (a.is_nfa) {
-        state.capture_rotated_token_now(a.id, core::to_lower(a.login));
+    ImGui::Dummy(ImVec2(0.0F, facet::Px(facet::T().spacing.xs)));
+    if (state.gc_autopull.active) {
+        if (facet::MenuItem("Stop refreshing CS2 data", {.icon = facet::Icon("stop")})) state.cancel_gc_autopull();
+    } else {
+        ImGui::BeginDisabled(!state.settings.cs2_gc.enabled);
+        if (facet::MenuItem("Refresh CS2 data for all accounts", {.icon = icons::crosshair})) state.refresh_gc_all(true);
+        ImGui::EndDisabled();
     }
-    sam::launch::LaunchOptions opts;
-    opts.cs2_launch_options            = state.settings.cs2_video.launch_options;
-    opts.disable_cloud_on_login        = state.settings.disable_cloud_on_login;
-    opts.disable_news_on_login         = state.settings.disable_news_on_login;
-    opts.login_invisible               = state.settings.login_invisible;
-    opts.disable_remote_play_on_login  = state.settings.disable_remote_play_on_login;
-    opts.disable_workshop_on_login     = state.settings.disable_workshop_on_login;
-    opts.remember_password             = state.settings.remember_password_on_login;
-    opts.gamesense_loader              = loader;
-    opts.luminary_loader               = lum_loader;
-    opts.hwid_component_mask           = state.settings.hwid.component_mask;
-    opts.use_token                     = use_token;
-    opts.safe_mode                     = safe;
+    const bool validate_busy = state.gc_validate.active && !state.gc_validate.feed_refresh_all;
+    const int gc_done = state.gc_autopull.received + (validate_busy ? state.gc_validate.done : 0);
+    const int gc_total =
+        state.gc_autopull.total + (validate_busy ? static_cast<int>(state.gc_validate.queue.size()) : 0);
+    if (!state.settings.cs2_gc.enabled) {
+        menu_note("Needs the CS2 connection, which is turned off in Settings.");
+        if (facet::MenuItem("Open CS2 settings...", {.icon = facet::Icon("settings")})) {
+            kit::open_settings(state, SettingsCategory::Cs2);
+        }
+    } else if (gc_total > 0 && gc_done < gc_total) {
+        progress_note("Pulled %d of %d accounts.", gc_done, gc_total);
+    } else {
+        menu_note("Level, medals, ranks and cooldown. Skips what is still up to date.");
+    }
 
-    if (!safe && state.settings.cleaner.enabled && state.settings.cleaner.run_before_launch &&
-        !state.cleaner_busy.load()) {
-        const app::Settings snapshot = state.settings;
-        opts.after_steam_down = [snapshot] {
-            app::cleaner_runner::run_blocking(snapshot, true,
-                                              false);
+    ImGui::Dummy(ImVec2(0.0F, facet::Px(facet::T().spacing.xs)));
+    const bool spend_busy = state.spend_bulk_running.load(std::memory_order_acquire);
+    const bool spend_shown = state.settings.info.show_external_funds;
+    ImGui::BeginDisabled(spend_busy || !spend_shown);
+    if (facet::MenuItem("Refresh spend for all accounts", {.icon = facet::Icon("refresh")})) state.refresh_all_spend(false);
+    ImGui::EndDisabled();
+    const int sp_total = state.spend_total.load(std::memory_order_relaxed);
+    const int sp_done = state.spend_done.load(std::memory_order_relaxed);
+    if (!spend_shown) {
+        menu_note("Spend is turned off in Settings, so it is not fetched.");
+    } else if (spend_busy) {
+        if (sp_total > 0) progress_note("Fetched %d of %d accounts.", sp_done, sp_total);
+        else menu_note("Fetching spend.");
+    } else {
+        menu_note("Reads the external funds total from Steam Support. One sign-in per account.");
+    }
+    facet::EndPopover();
+}
+
+
+void more_menu(app::AppState& state, const std::vector<std::size_t>& visible) {
+    ScreenState& s = screen();
+    if (facet::IconButton("More actions", facet::Icon("more-horizontal"), {.selected = s.more_menu_open})) {
+        s.more_menu_open = !s.more_menu_open;
+    }
+    if (!facet::BeginPopover("##more-menu", &s.more_menu_open,
+                             {.placement = facet::PopoverPlacement::Below, .arrow = false})) {
+        return;
+    }
+    ImGui::BeginDisabled(visible.size() < 2);
+    if (facet::MenuItem("Select all shown accounts", {.icon = facet::Icon("check")})) {
+        std::vector<std::string> ids;
+        for (std::size_t idx : visible) ids.push_back(state.vault.accounts[idx].id);
+        accounts::store_selection(state, ids);
+    }
+    ImGui::EndDisabled();
+    if (!state.settings.safe_mode) {
+        const bool cleaning = state.cleaner_busy.load();
+        ImGui::BeginDisabled(cleaning);
+        if (facet::MenuItem("Clean Steam caches...", {.icon = facet::Icon("trash")})) s.quick_clean_open = true;
+        ImGui::EndDisabled();
+        menu_note(cleaning ? "Cleaning Steam now." : "Deletes Steam's caches, logs and crash dumps. No account is signed out.");
+    }
+    facet::EndPopover();
+}
+
+// The page context line: how many accounts there are and how many the filters show. Progress
+// lives in the sidebar's activity, so it is said once (rule 4).
+std::string header_context(const app::AppState& state, const std::vector<std::size_t>& visible) {
+    const std::size_t all = state.vault.accounts.size();
+    const std::string total = kit::format_count(static_cast<long long>(all));
+    if (visible.size() == all) return total + (all == 1 ? " account" : " accounts");
+    return kit::format_count(static_cast<long long>(visible.size())) + " of " + total + " accounts shown";
+}
+
+// Why a flow: at 900 units or at scale 1.5 the search, three chips, the sort and the view switch
+// do not fit one row, and a flow wraps them in order instead of clipping.
+void toolbar(app::AppState& state, bool list) {
+    auto& q = state.settings.quick_filters;
+    facet::BeginFlow("##toolbar", {.gap = facet::Gap::Item});
+    if (facet::FlowNext()) {
+        facet::SearchField("##search", &state.search_query, {.placeholder = "Search name, login, notes", .width = 260.0F});
+    }
+    struct FilterChip {
+        const char* label;
+        bool* value;
+        facet::Icon icon;
+        const char* tip;
+    };
+    const FilterChip chips[] = {
+        {"Banned", &q.only_banned, icons::ban, "Only accounts with a ban"},
+        {"Cooldown", &q.only_cooldown, facet::Icon("clock"), "Only accounts in a CS2 cooldown"},
+        {"Prime", &q.only_prime, facet::Icon(), "Only accounts with CS2 Prime"},
+    };
+    for (const FilterChip& chip : chips) {
+        if (!facet::FlowNext()) continue;
+        if (facet::Chip(chip.label, {.selected = *chip.value, .icon = chip.icon})) {
+            *chip.value = !*chip.value;
+            state.save_settings();
+        }
+        facet::ItemTooltip("%s", chip.tip);
+    }
+    if (list && facet::FlowNext()) {
+        int sort = std::clamp(state.settings.accounts_sort, 0, 12);
+        if (facet::Dropdown("##sort", &sort, kSortLabels, {.width = 190.0F})) {
+            state.settings.accounts_sort = sort;
+            state.save_settings();
+        }
+        facet::ItemTooltip("Sort the list");
+    }
+    if (facet::FlowNext()) {
+        static const facet::ChoiceItem kViews[] = {
+            {.label = "List", .icon = facet::Icon("list")},
+            {.label = "Table", .icon = icons::table},
         };
+        int view = list ? 0 : 1;
+        if (facet::SegmentedControl("##view", &view, kViews, {.iconOnly = true})) {
+            state.settings.accounts_view = view == 0 ? app::AccountsViewMode::List : app::AccountsViewMode::Table;
+            state.save_settings();
+            screen().scrolled_to.clear();
+        }
     }
-
-    auto result = sam::launch::launch_account(a, opts);
-    if (result.status != sam::launch::LaunchStatus::Ok) {
-        state.launch_error = result.message;
-        ImGui::OpenPopup("Launch failed");
-        return;
-    }
-    if (result.hwid_outcome == sam::launch::InjectOutcome::Success) {
-        state.last_hwid_account_id = a.id;
-        ui::widgets::ToastItem t;
-        t.id = "hwid-" + a.id;
-        t.message = "HWID spoofed for " + a.login;
-        t.account_id = a.id;
-        t.is_warning = true;
-        t.expires_at_unix = now_seconds() + state.settings.notifications.toast_duration_seconds;
-        state.toasts.push(std::move(t));
-    } else if (result.hwid_outcome == sam::launch::InjectOutcome::Failed) {
-        ui::widgets::ToastItem t;
-        t.id = "hwid-fail-" + a.id;
-        t.message = "HWID spoof failed for " + a.login + ": " + result.hwid_error;
-        t.account_id = a.id;
-        t.expires_at_unix = now_seconds() + state.settings.notifications.toast_duration_seconds;
-        state.toasts.push(std::move(t));
-    }
-    a.last_login_unix = now_seconds();
-    state.vault_dirty = true;
-    state.save_vault_if_dirty();
-
-    if (a.is_nfa) {
-        state.capture_rotated_token_async(a.id, a.steam_id_64, core::to_lower(a.login));
-    } else if (use_token) {
-        state.verify_cm_token_signin_async(a.id, a.steam_id_64, core::to_lower(a.login));
-    }
-    if (state.settings.cs2_video.mode != app::CS2ConfigMode::None) {
-        state.apply_cs2_video_config(a);
-    }
-    if (method != core::LoginMethod::Normal && !result.first_login_deferred) {
-        sam::launch::cs2_autostart::start_async(method, a.steam_id_64,
-                                                std::move(loader), std::move(lum_loader));
-    }
+    facet::EndFlow();
 }
 
-void handle_card_action(app::AppState& state,
-                        core::Account& a,
-                        widgets::CardAction act) {
-    switch (act) {
-        case widgets::CardAction::Launch: {
-            state.flush_pending_save();
-            if (!state.settings.safe_mode && state.settings.hwid.always_spoof &&
-                !a.hwid_excluded && !a.hwid.has_value()) {
-                a.hwid = core::hwid::generate_profile();
-                state.vault_dirty = true;
-                state.save_vault_if_dirty();
-            }
-
-            const bool use_token =
-                !a.is_nfa &&
-                state.effective_sign_in_method(a.id) == app::SignInMethod::TokenInject;
-
-            state.cm_relaunch_attempted.erase(a.id);
-
-            if (use_token && !app::cm_token_valid(a)) {
-                if (a.password.empty()) {
-                    state.launch_error =
-                        "Token injection needs a stored password to mint the login "
-                        "token, but this account has no password.";
-                    ImGui::OpenPopup("Launch failed");
-                    break;
-                }
-                state.pending_token_launch = {a.id, true, false, false, {}};
-                const std::string aid = a.id;
-                state.acquire_cm_token(aid, [&state, aid](bool ok, std::string err) {
-                    state.pending_token_launch.minting = false;
-                    state.pending_token_launch.mint_done = true;
-                    state.pending_token_launch.mint_ok = ok;
-                    state.pending_token_launch.mint_error = std::move(err);
-                });
-                {
-                    ui::widgets::ToastItem t;
-                    t.id = "token-mint-" + a.id;
-                    t.message = "Minting login token for " + a.login + "...";
-                    t.account_id = a.id;
-                    t.expires_at_unix = now_seconds() + 15;
-                    state.toasts.push(std::move(t));
-                }
-                break;
-            }
-
-            do_launch(state, a, use_token);
-            break;
-        }
-        case widgets::CardAction::CopyCode:
-            if (a.sda) {
-                const std::string code = sda::generate_code_now(a.sda->shared_secret);
-                platform::clipboard::set_text_with_auto_clear(
-                    code, std::chrono::seconds(state.settings.clipboard_clear_seconds));
-            }
-            break;
-        case widgets::CardAction::OpenSda:
-            state.selected_account_id = a.id;
-            state.current_screen = app::Screen::Authenticator;
-            break;
-        case widgets::CardAction::Edit:
-            state.selected_account_id = a.id;
-            state.account_edit_requested = true;
-            break;
-        case widgets::CardAction::Refresh:
-
-            state.refresh_single_account(a.id);
-            if (!a.is_nfa) state.refresh_spend(a.id, true);
-            state.queue_gc_validate(a.id);
-            break;
-        case widgets::CardAction::Remove:
-            state.selected_account_id = a.id;
-            ImGui::OpenPopup("Confirm removal");
-            break;
-        case widgets::CardAction::ToggleSelect:
-            state.toggle_selected(a.id);
-            break;
-        case widgets::CardAction::None:
-        case widgets::CardAction::Reveal:
-            break;
-    }
-}
-
-void draw_grid_body(app::AppState& state,
-                    const std::vector<std::size_t>& visible) {
-    ImGui::Indent(kGridInset);
-
-    const float left_inset = ImGui::GetCursorPosX();
-    const float avail = ImGui::GetContentRegionAvail().x - left_inset;
-    const int columns = std::max(1,
-        static_cast<int>((avail + kGap) / (kCardMinWidth + kGap)));
-    const float card_w = (avail - kGap * static_cast<float>(columns - 1)) /
-                         static_cast<float>(columns);
-
-    const int rows = (static_cast<int>(visible.size()) + columns - 1) / columns;
-    const float row_pitch =
-        widgets::kAccountCardHeight + ImGui::GetStyle().ItemSpacing.y;
-
-    ImGuiListClipper clipper;
-    clipper.Begin(rows, row_pitch);
-    while (clipper.Step()) {
-        for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
-            ImGui::SetCursorPosX(left_inset);
-            for (int c = 0; c < columns; ++c) {
-                const std::size_t vi =
-                    static_cast<std::size_t>(row) * static_cast<std::size_t>(columns) +
-                    static_cast<std::size_t>(c);
-                if (vi >= visible.size()) break;
-                if (c > 0) ImGui::SameLine(0.0F, kGap);
-                auto& a = state.vault.accounts[visible[vi]];
-                const auto act = widgets::draw_account_card(state, a, card_w);
-                if (act != widgets::CardAction::None) {
-                    handle_card_action(state, a, act);
-                }
-            }
-        }
-    }
-    clipper.End();
-
-    ImGui::Unindent(kGridInset);
-}
-
-void draw_change_username_modal(app::AppState& state) {
-    static std::array<char, 128> name_buf{};
-    static bool busy = false;
-    static std::string status;
-    static bool status_error = false;
-
-    if (state.persona_change_requested) {
-        state.persona_change_requested = false;
-        busy = false;
-        status.clear();
-        name_buf.fill('\0');
-        if (const auto* acc = state.find_account(state.selected_account_id)) {
-            std::snprintf(name_buf.data(), name_buf.size(), "%s",
-                          acc->web.persona_name.c_str());
-        }
-        ImGui::OpenPopup("Change username");
-    }
-
-    if (!begin_styled_modal("Change username")) return;
-
-    const core::Account* acc = state.find_account(state.selected_account_id);
-    if (acc == nullptr) {
-        ImGui::TextDisabled("Account no longer exists.");
-        if (action_button("Close", ImVec2(80, 0))) ImGui::CloseCurrentPopup();
-        end_styled_modal();
-        return;
-    }
-
-    ImGui::TextUnformatted("New Steam display name");
-    ImGui::SetNextItemWidth(-1.0F);
-    ImGui::BeginDisabled(busy);
-    ImGui::InputText("##new-persona", name_buf.data(), name_buf.size());
-    ImGui::EndDisabled();
-
-    if (!status.empty()) {
-        ImGui::Spacing();
-        ImGui::PushStyleColor(ImGuiCol_Text,
-                              status_error ? theme::danger() : theme::success());
-        ImGui::TextWrapped("%s", status.c_str());
-        ImGui::PopStyleColor();
-    } else if (busy) {
-        ImGui::Spacing();
-        ImGui::TextDisabled("Applying...");
-    }
-
-    const std::int64_t cooldown = state.persona_change_cooldown_seconds(acc->id);
-    if (cooldown > 0) {
-        ImGui::Spacing();
-        ImGui::PushStyleColor(ImGuiCol_Text, theme::warning());
-        if (cooldown >= 60) {
-            ImGui::Text("Rate limited - try again in %lldm %02llds",
-                        static_cast<long long>(cooldown / 60),
-                        static_cast<long long>(cooldown % 60));
-        } else {
-            ImGui::Text("Rate limited - try again in %llds",
-                        static_cast<long long>(cooldown));
-        }
-        ImGui::PopStyleColor();
-    }
-
-    ImGui::Spacing();
-    const bool name_ok = name_buf[0] != '\0';
-    ImGui::BeginDisabled(busy || !name_ok || cooldown > 0);
-    if (action_button("Apply", ImVec2(100, 0))) {
-        busy = true;
-        status.clear();
-        const std::string new_name = name_buf.data();
-        core::Account snapshot = *acc;
-        app::job_pump::submit(
-            [&state, snapshot, new_name]() mutable {
-                auto res = sam::profile::change_persona_name(snapshot, new_name);
-                if (!res.ok && res.needs_relogin) {
-                    std::string err;
-                    if (state.auto_relogin(snapshot.id, snapshot, &err)) {
-                        res = sam::profile::change_persona_name(snapshot, new_name);
-                    }
-                }
-                state.post_ui_callback(
-                    [&state, snapshot = std::move(snapshot),
-                     new_name = std::move(new_name), res]() mutable {
-                        const std::string shown =
-                            res.applied_name.empty() ? new_name : res.applied_name;
-                        if (auto* a = state.find_account(snapshot.id)) {
-                            a->refresh_token        = snapshot.refresh_token;
-                            a->access_token         = snapshot.access_token;
-                            a->access_token_expires = snapshot.access_token_expires;
-                            a->steam_login_secure   = snapshot.steam_login_secure;
-                            a->session_id           = snapshot.session_id;
-                            if (res.ok) {
-                                a->web.persona_name = shown;
-                                state.last_persona_change_unix[snapshot.id] =
-                                    sam::ui::now_seconds();
-                            }
-                            state.vault_dirty = true;
-                            state.save_vault_if_dirty();
-                        }
-
-                        if (state.selected_account_id != snapshot.id) return;
-                        busy = false;
-                        if (res.ok) {
-                            status = "Display name changed to \"" + shown + "\".";
-                            status_error = false;
-                        } else {
-                            status = res.error.empty()
-                                ? std::string("Failed to change the name.")
-                                : res.error;
-                            status_error = true;
-                        }
-                    });
-            });
-    }
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    if (action_button(status.empty() ? "Cancel" : "Close", ImVec2(100, 0))) {
-        name_buf.fill('\0');
-        status.clear();
-        busy = false;
-        ImGui::CloseCurrentPopup();
-    }
-    end_styled_modal();
+void warn_missing_api_key(app::AppState& state) {
+    if (state.warned_missing_api_key || state.vault.accounts.empty() || !state.settings.web_api_key.empty()) return;
+    kit::show_toast(state, "No Steam Web API key is set, so account data is not refreshed. Add one in Settings.",
+                    {.tone = widgets::ToastTone::Warning,
+                     .id = "missing-api-key",
+                     .settings_category = static_cast<int>(SettingsCategory::NetworkData),
+                     .seconds = -1});
+    state.warned_missing_api_key = true;
 }
 
 }  // namespace
 
+// Why this order: the header says how many accounts there are, the toolbar narrows the list,
+// and the chosen view fills the rest of the page. An empty vault shows one thing to do.
 void draw_accounts(app::AppState& state) {
-    static widgets::ExportBundleState export_state;
+    accounts::track_context(state);
+    warn_missing_api_key(state);
+    const bool list = state.settings.accounts_view == app::AccountsViewMode::List;
+    const std::vector<std::size_t> visible = accounts::visible_accounts(state, list ? state.settings.accounts_sort : 0);
+    const bool any = !state.vault.accounts.empty();
 
-    ImGui::TextUnformatted("Accounts");
-    ImGui::SameLine();
-    ImGui::TextDisabled("(%zu)", state.vault.accounts.size());
-
-    if (!state.warned_missing_api_key &&
-        !state.vault.accounts.empty() &&
-        state.settings.web_api_key.empty()) {
-        widgets::ToastItem t;
-        t.id = "missing-api-key";
-        t.message = "No Steam Web API key set, so account data won't be refreshed. "
-                    "Click here to add one in Settings.";
-        t.is_warning = true;
-        t.on_click_action = widgets::ToastClickAction::Settings;
-        t.settings_category = static_cast<int>(SettingsCategory::NetworkData);
-        t.expires_at_unix = 0;
-        state.toasts.push(std::move(t));
-        state.warned_missing_api_key = true;
-    }
-
-    ImGui::Spacing();
-
-    widgets::draw_search_bar(state.search_query, 320.0F);
-    ImGui::SameLine();
     {
-        const char* label = state.selection_mode ? "Exit selection" : "Select";
-        if (action_button(label)) {
-            if (state.selection_mode) state.exit_selection_mode();
-            else                       state.enter_selection_mode();
-        }
-    }
-    ImGui::SameLine();
-    {
-
-        const bool no_api_key = state.settings.web_api_key.empty();
-        ImGui::BeginDisabled(no_api_key);
-        if (action_button("Refresh all")) {
-            state.refresh_account_data(false, true);
-        }
-        ImGui::EndDisabled();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            if (no_api_key) {
-                set_tooltip("Add a Steam Web API key in Settings to enable batch refresh.");
-            } else {
-                set_tooltip("Refreshes Steam data, GCPD and the CS2 cooldown. "
-                            "Skips anything still cached.");
+        kit::PageScope page("accounts", {.scroll = false});
+        {
+            const std::string context = header_context(state, visible);
+            kit::PageHeaderScope header("Accounts", {.context = context.c_str()});
+            if (any) {
+                refresh_menu(state);
+                if (facet::Button("New group", {.icon = facet::Icon("plus")})) accounts::request_new_group();
+                more_menu(state, visible);
             }
         }
 
-        const int total = state.refresh_all_total.load(std::memory_order_relaxed);
-        const int done  = state.refresh_all_done.load(std::memory_order_relaxed);
-        if (total > 0 && done < total) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("Refreshing %d/%d", done, total);
-        }
-    }
-    ImGui::SameLine();
-    {
-
-        const bool validate_busy =
-            state.gc_validate.active && !state.gc_validate.feed_refresh_all;
-        if (state.gc_autopull.active) {
-            if (action_button("Stop GC pull")) state.cancel_gc_autopull();
+        if (!any) {
+            // Centred in the page: a quarter of the free height above the block.
+            ImGui::Dummy(ImVec2(0.0F, ImGui::GetContentRegionAvail().y * 0.25F));
+            if (kit::empty_state("No accounts yet",
+                                 {.message = "Add one by signing in with its password, importing a Steam Guard file, "
+                                             "or using the login Steam saved on this PC.",
+                                  .icon = facet::Icon("user"),
+                                  .action_label = "Add account",
+                                  .action_icon = facet::Icon("plus")})) {
+                kit::go_to(state, app::Screen::AddAccount);
+            }
         } else {
-            ImGui::BeginDisabled(!state.settings.cs2_gc.enabled);
-            if (action_button("Refresh GC")) state.refresh_gc_all(true);
-            ImGui::EndDisabled();
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-                if (!state.settings.cs2_gc.enabled)
-                    set_tooltip("Enable the CS2 Game Coordinator in Settings to use this.");
-                else
-                    set_tooltip("Pulls level, medals, ranks and cooldown for every account. "
-                                "Skips anything still cached.");
-            }
-        }
-
-        const int gc_done = state.gc_autopull.received +
-                            (validate_busy ? state.gc_validate.done : 0);
-        const int gc_total = state.gc_autopull.total +
-                            (validate_busy ? static_cast<int>(state.gc_validate.queue.size()) : 0);
-        if (gc_total > 0 && gc_done < gc_total) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("GC %d/%d", gc_done, gc_total);
-        }
-    }
-    if (state.settings.info.show_external_funds) {
-        ImGui::SameLine();
-        const bool busy = state.spend_bulk_running.load(std::memory_order_acquire);
-        ImGui::BeginDisabled(busy);
-        if (action_button("Refresh spent")) {
-            state.refresh_all_spend(false);
-        }
-        ImGui::EndDisabled();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            set_tooltip("Reads total external funds from Steam Support. "
-                        "One sign-in per account.");
-        }
-        const int sp_total = state.spend_total.load(std::memory_order_relaxed);
-        const int sp_done  = state.spend_done.load(std::memory_order_relaxed);
-        if (busy || (sp_total > 0 && sp_done < sp_total)) {
-            ImGui::SameLine();
-            if (sp_total > 0)
-                ImGui::TextDisabled("Fetching funds %d/%d", sp_done, sp_total);
-            else
-                ImGui::TextDisabled("Fetching funds...");
-        }
-    }
-    if (!state.settings.safe_mode) {
-        ImGui::SameLine();
-        const bool cleaning = state.cleaner_busy.load();
-        ImGui::BeginDisabled(cleaning);
-        if (action_button("Quick clean")) ImGui::OpenPopup("Quick clean?");
-        ImGui::EndDisabled();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            set_tooltip(cleaning ? "Cleaning..."
-                                 : "Deletes Steam's caches, logs and crash dumps. "
-                                   "No account is signed out.");
-        }
-        if (cleaning) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("Cleaning...");
-        }
-
-        if (begin_styled_modal("Quick clean?")) {
-            ImGui::TextWrapped("Closes Steam, then deletes its caches, logs and crash dumps. "
-                               "No account is signed out and no saved login is touched.");
-            ImGui::Spacing();
-            if (action_button("Cancel", ImVec2(110, 0))) ImGui::CloseCurrentPopup();
-            ImGui::SameLine();
-            if (action_button("Clean", ImVec2(110, 0))) {
-                app::cleaner_runner::run_async(state, app::cleaner_runner::Trigger::QuickClean);
-                ImGui::CloseCurrentPopup();
-            }
-            end_styled_modal();
-        }
-    }
-
-    if (state.settings.accounts_view == app::AccountsViewMode::List) {
-        ImGui::SameLine();
-        if (action_button("New group")) {
-            ImGui::OpenPopup("New group");
-        }
-        draw_new_group_modal(state);
-    }
-
-    ImGui::Spacing();
-    {
-        ImGui::TextDisabled("Sort");
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(180);
-        const char* sort_labels =
-            "Persona A-Z\0"
-            "Persona Z-A\0"
-            "Login A-Z\0"
-            "Last login\0"
-            "Created\0"
-            "Premier\0"
-            "Steam lvl\0"
-            "CS2 lvl\0"
-            "No cooldown\0"
-            "Drop unclaimed\0"
-            "CS2 XP\0"
-            "Spend ($)\0"
-            "Cooldown soon\0";
-        if (styled_combo("##sort", &state.settings.accounts_sort, sort_labels)) {
-            state.save_settings();
-        }
-        ImGui::SameLine();
-        ImGui::TextDisabled("|");
-        ImGui::SameLine();
-        if (ImGui::Checkbox("Only banned", &state.settings.quick_filters.only_banned)) {
-            state.save_settings();
-        }
-        ImGui::SameLine();
-        if (ImGui::Checkbox("Only cooldown", &state.settings.quick_filters.only_cooldown)) {
-            state.save_settings();
-        }
-        ImGui::SameLine();
-        if (ImGui::Checkbox("Only Prime", &state.settings.quick_filters.only_prime)) {
-            state.save_settings();
-        }
-    }
-
-    core::AccountFilter filter;
-    filter.query = state.search_query;
-    filter.only_with_any_ban = state.settings.quick_filters.only_banned;
-    filter.only_with_cooldown = state.settings.quick_filters.only_cooldown;
-    filter.only_with_prime = state.settings.quick_filters.only_prime;
-    filter.now_unix = std::chrono::duration_cast<std::chrono::seconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-    filter.sort = static_cast<core::SortKey>(std::clamp(state.settings.accounts_sort,
-                                                         0, 12));
-    const auto visible = core::apply_filter(state.vault.accounts, filter);
-
-    if (state.selection_mode) {
-        ImGui::Spacing();
-        if (action_button("Select all visible")) {
-            for (std::size_t idx : visible) {
-                state.selected_account_ids.insert(state.vault.accounts[idx].id);
-            }
-        }
-        ImGui::SameLine();
-        if (action_button("Clear")) {
-            state.selected_account_ids.clear();
-        }
-        ImGui::SameLine();
-        ImGui::TextDisabled("%zu selected", state.selected_account_ids.size());
-        ImGui::SameLine();
-
-        const bool none_selected = state.selected_account_ids.empty();
-        ImGui::BeginDisabled(none_selected);
-        if (action_button("Export selected...")) {
-            std::vector<std::string> ids(state.selected_account_ids.begin(),
-                                          state.selected_account_ids.end());
-            widgets::request_export_bundle(export_state, std::move(ids));
-        }
-        ImGui::SameLine();
-        if (action_button("Delete selected")) {
-            ImGui::OpenPopup("Confirm bulk removal");
-        }
-        ImGui::EndDisabled();
-    }
-
-    ImGui::Spacing();
-    separator();
-    ImGui::Dummy(ImVec2(0.0F, kGridInset));
-
-    if (state.settings.accounts_view == app::AccountsViewMode::List) {
-        auto res = draw_list_body(state, visible);
-        if (res.action != widgets::CardAction::None) {
-            if (auto* acc = state.find_account(res.action_account_id)) {
-                handle_card_action(state, *acc, res.action);
-            }
-        }
-    } else {
-        draw_grid_body(state, visible);
-    }
-
-    if (state.settings.safe_mode) {
-        state.gamesense_pick_request.reset();
-        state.luminary_pick_request.reset();
-    }
-
-    if (state.gamesense_pick_request.has_value()) {
-        const std::string acc_id = *state.gamesense_pick_request;
-        state.gamesense_pick_request.reset();
-
-        platform::file_dialog::Options opts;
-        opts.parent = state.main_hwnd;
-        opts.title = L"Choose gamesense loader";
-        opts.filters = {
-            {L"Executable (*.exe)", L"*.exe"},
-            {L"All files (*.*)", L"*.*"},
-        };
-        const auto picked = platform::file_dialog::open_file(opts);
-        if (picked.ok) {
-            std::string err;
-            if (app::install_gamesense_loader(picked.path, &err)) {
-                if (!acc_id.empty()) {
-                    if (auto* acc = state.find_account(acc_id)) {
-                        acc->login_method = core::LoginMethod::LaunchCs2Gamesense;
-                        state.vault_dirty = true;
-                        state.save_vault_if_dirty();
-                    }
+            toolbar(state, list);
+            ImGui::Dummy(ImVec2(0.0F, facet::Px(facet::T().spacing.sm)));
+            if (visible.empty()) {
+                std::string message = "No account matches";
+                if (!state.search_query.empty()) message += " \"" + state.search_query + "\"";
+                message += state.search_query.empty() ? " the filters that are on." : " with the filters that are on.";
+                if (facet::EmptyState("No matching accounts", {.message = message.c_str(),
+                                                               .icon = facet::Icon("search"),
+                                                               .actionLabel = "Clear filters"})) {
+                    accounts::clear_filters(state);
                 }
+            } else if (list) {
+                accounts::draw_list_view(state, visible);
             } else {
-                state.launch_error = err.empty()
-                    ? std::string("Could not install the gamesense loader.")
-                    : err;
-                ImGui::OpenPopup("Launch failed");
+                accounts::draw_table_view(state, visible);
             }
         }
+        accounts::draw_dialogs(state);
     }
-
-    if (state.luminary_pick_request.has_value()) {
-        const std::string acc_id = *state.luminary_pick_request;
-        state.luminary_pick_request.reset();
-
-        platform::file_dialog::Options opts;
-        opts.parent = state.main_hwnd;
-        opts.title = L"Choose luminary loader";
-        opts.filters = {
-            {L"Executable (*.exe)", L"*.exe"},
-            {L"All files (*.*)", L"*.*"},
-        };
-        const auto picked = platform::file_dialog::open_file(opts);
-        if (picked.ok) {
-            std::string err;
-            if (app::install_luminary_loader(picked.path, &err)) {
-                if (!acc_id.empty()) {
-                    if (auto* acc = state.find_account(acc_id)) {
-                        acc->login_method = core::LoginMethod::LaunchCs2Luminary;
-                        state.vault_dirty = true;
-                        state.save_vault_if_dirty();
-                    }
-                }
-            } else {
-                state.launch_error = err.empty()
-                    ? std::string("Could not install the luminary loader.")
-                    : err;
-                ImGui::OpenPopup("Launch failed");
-            }
-        }
-    }
-
-    if (state.pending_token_launch.mint_done) {
-        auto& ptl = state.pending_token_launch;
-        const std::string aid = ptl.account_id;
-        const bool ok = ptl.mint_ok;
-        std::string err = std::move(ptl.mint_error);
-        ptl = {};
-        if (!ok) {
-            state.launch_error = "Could not mint login token: " + err;
-            ImGui::OpenPopup("Launch failed");
-        } else if (auto* acc = state.find_account(aid)) {
-            do_launch(state, *acc, true);
-        }
-    }
-
-    if (begin_styled_modal("Confirm removal")) {
-        ImGui::TextWrapped("Remove this account from the vault? This cannot be undone.");
-        ImGui::Spacing();
-        if (action_button("Remove", ImVec2(100, 0))) {
-            state.remove_accounts({state.selected_account_id});
-            state.selected_account_id.clear();
-            state.vault_dirty = true;
-            state.save_vault_if_dirty();
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SameLine();
-        if (action_button("Cancel", ImVec2(100, 0))) {
-            state.selected_account_id.clear();
-            ImGui::CloseCurrentPopup();
-        }
-        end_styled_modal();
-    }
-
-    if (begin_styled_modal("Confirm bulk removal", 460.0F)) {
-        const std::size_t n = state.selected_account_ids.size();
-        ImGui::TextWrapped("Remove %zu account%s from the vault? This cannot be undone.",
-                           n, n == 1 ? "" : "s");
-
-        std::vector<const core::Account*> picked;
-        picked.reserve(n);
-        for (const auto& a : state.vault.accounts) {
-            if (state.selected_account_ids.count(a.id) != 0) {
-                picked.push_back(&a);
-                if (picked.size() >= 5) break;
-            }
-        }
-        ImGui::Indent(20.0F);
-        ImGui::PushStyleColor(ImGuiCol_Text, theme::dim_text());
-        for (const auto* a : picked) {
-            ImGui::BulletText("%s", a->login.c_str());
-        }
-        if (n > picked.size()) {
-            ImGui::BulletText("... and %zu more", n - picked.size());
-        }
-        ImGui::PopStyleColor();
-        ImGui::Unindent(20.0F);
-
-        ImGui::Spacing();
-        if (action_button("Remove", ImVec2(100, 0))) {
-            state.remove_accounts(state.selected_account_ids);
-            state.selected_account_ids.clear();
-            state.vault_dirty = true;
-            state.save_vault_if_dirty();
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SameLine();
-        if (action_button("Cancel", ImVec2(100, 0))) {
-            ImGui::CloseCurrentPopup();
-        }
-        end_styled_modal();
-    }
-
-    if (begin_styled_modal("Launch failed")) {
-        ImGui::TextWrapped("%s", state.launch_error.c_str());
-        ImGui::Spacing();
-        if (action_button("OK", ImVec2(80, 0))) {
-            state.launch_error.clear();
-            ImGui::CloseCurrentPopup();
-        }
-        end_styled_modal();
-    }
-
-    draw_change_username_modal(state);
-    draw_edit_notes_modal(state);
-    draw_edit_account_modal(state);
-
-    widgets::draw_export_bundle_modal(state, export_state);
+    accounts::run_pumps(state);
 }
 
 }  // namespace sam::ui::screens

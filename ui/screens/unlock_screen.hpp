@@ -4,6 +4,8 @@
 
 namespace sam::ui::screens {
 
+// The locked screen: one card that unlocks the active vault, switches between vaults, creates
+// the first or a new vault and offers an existing data folder (ui/screens/unlock/).
 void draw_unlock(app::AppState& state);
 
 // Attempts to open the ACTIVE vault silently using its DPAPI master-password

@@ -173,7 +173,12 @@ std::filesystem::path default_data_dir() {
 
 namespace {
 
+std::filesystem::path g_data_dir_override;
+bool g_data_dir_resolved = false;
+
 std::filesystem::path resolve_data_dir() {
+    g_data_dir_resolved = true;
+    if (!g_data_dir_override.empty()) return g_data_dir_override;
     auto exe = module_directory();
     if (!exe.empty() && std::filesystem::exists(exe / L"portable.flag")) {
         return exe / L"data";
@@ -194,6 +199,14 @@ std::filesystem::path resolve_data_dir() {
 }
 
 }  // namespace
+
+#ifdef SAM_UI_CAPTURE
+bool set_data_dir_override(const std::filesystem::path& dir) {
+    if (g_data_dir_resolved) return false;
+    g_data_dir_override = dir;
+    return true;
+}
+#endif
 
 std::filesystem::path data_dir() {
     static const std::filesystem::path cached = resolve_data_dir();

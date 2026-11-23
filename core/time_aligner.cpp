@@ -28,8 +28,16 @@ std::thread g_thread;
 constexpr auto kSyncInterval = std::chrono::hours(1);
 constexpr auto kRetryInterval = std::chrono::seconds(60);
 
+#ifdef SAM_UI_CAPTURE
+std::atomic<std::int64_t> g_fixed_now{0};
+#endif
+
 std::int64_t now_seconds() {
     using namespace std::chrono;
+#ifdef SAM_UI_CAPTURE
+    const std::int64_t fixed = g_fixed_now.load(std::memory_order_acquire);
+    if (fixed != 0) return fixed;
+#endif
     return duration_cast<seconds>(system_clock::now().time_since_epoch()).count();
 }
 
@@ -132,5 +140,14 @@ bool sync_now() {
 void sync_now_async() {
     std::thread([] { (void)sync_now(); }).detach();
 }
+
+#ifdef SAM_UI_CAPTURE
+void use_fixed_clock(std::int64_t fixed_unix) {
+    g_fixed_now.store(fixed_unix, std::memory_order_release);
+    g_offset.store(0, std::memory_order_release);
+    g_last_success_unix.store(fixed_unix, std::memory_order_release);
+    g_synced.store(true, std::memory_order_release);
+}
+#endif
 
 }  // namespace sam::time_aligner

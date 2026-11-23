@@ -176,7 +176,7 @@ struct AppState {
     std::unordered_map<std::string, SignInMethod> sign_in_override;
 
     // Multi-select on Accounts. Cleared by clear_session_secrets() on lock and by
-    // rail_nav when leaving the screen with selection_mode off.
+    // kit::go_to when leaving the screen with selection_mode off.
     bool selection_mode = false;
     std::unordered_set<std::string> selected_account_ids;
     std::chrono::steady_clock::time_point last_interaction =
@@ -297,12 +297,13 @@ struct AppState {
     std::unordered_map<std::string, std::int64_t> last_persona_change_unix;
 
     // WM_DROPFILES enqueues dropped .maFile / info.dat (recursing into dropped
-    // dirs); AddAccount drains the matching queue next frame.
+    // dirs) and a dropped .samvault bundle; AddAccount drains them next frame.
     std::mutex drop_mutex;
     std::vector<std::string> pending_mafile_drops;
     bool pending_mafile_focus = false;
     std::vector<std::string> pending_info_dat_drops;
     bool pending_info_dat_focus = false;
+    std::string pending_bundle_drop;  // the first dropped bundle; empty when none
 
     // Set by a worker when a refresh_token is exhausted; next frame pops the Add
     // Account wizard on "Full login" with this login prefilled, then clears it.
