@@ -1,8 +1,8 @@
 #pragma once
 
-#define SAM_VERSION_MAJOR 1
-#define SAM_VERSION_MINOR 9
-#define SAM_VERSION_PATCH 1
+#define SAM_VERSION_MAJOR 2
+#define SAM_VERSION_MINOR 0
+#define SAM_VERSION_PATCH 0
 
 #ifdef __cplusplus
 
@@ -10,7 +10,7 @@
 
 namespace sam {
 
-inline constexpr std::string_view kVersion = "1.9.1";
+inline constexpr std::string_view kVersion = "2.0.0";
 inline constexpr std::string_view kAppName = "Steam Account Manager";
 inline constexpr std::string_view kRepoUrl = "https://github.com/velyndev/steam-account-manager";
 
