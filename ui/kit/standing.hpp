@@ -75,9 +75,16 @@ bool trust_dropdown(const char* label, core::TrustLabel* trust);
 // "Token revoked" in Destructive. Draws nothing and returns false for a full-access account.
 bool account_kind_badge(const core::Account& account);
 
-// A neutral "Prime" badge while cs2.prime_status is set; nothing otherwise. Returns whether it
-// drew. Honors settings.info.show_prime.
+// A neutral "Prime" badge while cs2.prime_status is set, "Likely Prime" while that value is
+// only the estimate (cs2.prime_confirmed unset); nothing otherwise. Returns whether it drew.
+// Honors settings.info.show_prime.
 bool prime_badge(const app::AppState& state, const core::Account& account);
+// Tooltip for an estimated Prime value: where the estimate comes from and how to get the exact
+// status. Names the CS2 screen only while the CS2 connection is on, since it is hidden otherwise.
+std::string prime_estimate_hint(const app::AppState& state);
+// The Prime line of an account's details: "Yes" or "No" once the Game Coordinator has told the
+// account itself, else the estimate ("Likely" or "Unknown") followed by how to check it.
+std::string prime_detail_text(const app::AppState& state, const core::Account& account);
 
 // The weekly drop: true while it is claimed for this week (cs2.weekly_drop_reset_unix in the
 // future). weekly_drop_badge draws a Success badge "Drop claimed" with the sam-weekly-drop icon

@@ -61,6 +61,9 @@ struct ProfileResult {
     // -1 = unknown (foreign profiles / not yet seen), 0 = no cooldown, >0 = unix expiry.
     std::int64_t cooldown_expires_unix = -1;
     std::string cooldown_reason;
+    // Prime, from the account's OWN game-account object. -1 = unknown (the GC tells nobody
+    // else, so always for foreign profiles), 0 = no Prime, 1 = Prime.
+    int prime = -1;
 };
 
 // CS2 weekly recurring mission progress (from the GC SO cache). Per-account, keyed to a
@@ -104,6 +107,9 @@ public:
     bool pop_notification(GcNotification& out);
     const PersonalStore& personal_store() const { return personal_store_; }
     const PlayerXp& player_xp() const { return player_xp_; }
+    // Whether the signed-in account has Prime: -1 until the GC has sent its game-account
+    // object, then 0 or 1.
+    int prime() const { return prime_; }
     // Request any account's public profile (medals + level/XP) over this live GC session.
     // Replies land in take_profiles(); the own account also updates player_xp().
     void request_profile(std::uint32_t account_id);
@@ -129,6 +135,7 @@ private:
     void upsert_econ_item(const std::string& data);
     void erase_econ_item(const std::string& data);
     void load_personal_store(const std::string& data);
+    void load_game_account(const std::string& data);
     // An SO object whose type id we don't model. Logs the type id once (the weekly
     // mission's id is undocumented) and identifies the recurring mission by shape.
     void on_unknown_so(int type_id, const std::string& data);
@@ -146,6 +153,7 @@ private:
     std::deque<GcNotification> notifications_;
     PersonalStore personal_store_;
     PlayerXp player_xp_;
+    int prime_ = -1;  // see prime()
     // The own account's competitive cooldown, captured from the unsolicited
     // MatchmakingGC2ClientHello the GC sends at connect. `seen` gates whether we have an
     // authoritative value; `expires` is 0 (no cooldown) or a unix expiry.

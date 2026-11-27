@@ -279,9 +279,30 @@ bool account_kind_badge(const core::Account& account) {
 
 bool prime_badge(const app::AppState& state, const core::Account& account) {
     if (!state.settings.info.show_prime || !account.cs2.prime_status) return false;
-    facet::Badge("Prime");
-    facet::ItemTooltip("CS2 Prime status");
+    if (account.cs2.prime_confirmed) {
+        facet::Badge("Prime");
+        facet::ItemTooltip("CS2 Prime status");
+    } else {
+        facet::Badge("Likely Prime");
+        facet::ItemTooltip("%s", prime_estimate_hint(state).c_str());
+    }
     return true;
+}
+
+std::string prime_estimate_hint(const app::AppState& state) {
+    std::string hint = "Estimated from the CS2 level and XP: Steam tells only the account itself whether it has Prime. ";
+    hint += state.settings.cs2_gc.enabled ? "Connect the account on the CS2 screen for the exact status."
+                                          : "The exact status needs the CS2 connection, which is off in Settings > CS2.";
+    return hint;
+}
+
+std::string prime_detail_text(const app::AppState& state, const core::Account& account) {
+    const core::CS2Status& cs2 = account.cs2;
+    if (cs2.prime_confirmed) return cs2.prime_status ? "Yes" : "No";
+    std::string text = cs2.prime_status ? "Likely, going by level and XP. " : "Unknown. ";
+    text += state.settings.cs2_gc.enabled ? "Connect on the CS2 screen to check."
+                                          : "Checking needs the CS2 connection (Settings > CS2).";
+    return text;
 }
 
 bool weekly_drop_claimed(const core::Account& account, std::int64_t now) {

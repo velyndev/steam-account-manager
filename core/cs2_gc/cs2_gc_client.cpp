@@ -168,6 +168,7 @@ void Cs2GcClient::post_snapshot(GcSession& gc) {
     snap.progress = make_progress(xp);
     snap.featured_medal_defidx = xp.featured_medal_defidx;
     snap.medals = resolve_medals(*schema_, xp.medal_defidx);
+    snap.prime = gc.prime();
 
     const MissionInfo mi = gc.current_mission();
     if (mi.valid) {
@@ -376,6 +377,7 @@ void Cs2GcClient::run() {
                         pp.ranks.wingman_wins = r.wingman_wins;
                         pp.ranks.cooldown_expires_unix = r.cooldown_expires_unix;
                         pp.ranks.cooldown_reason = r.cooldown_reason;
+                        pp.prime = r.prime;
                         cb_.on_profile(std::move(pp));
                     }
                 };

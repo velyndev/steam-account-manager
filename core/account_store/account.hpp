@@ -120,7 +120,13 @@ struct CS2Status {
     int wingman_wins    = -1;
     int cs2_player_level = -1;             // "CS:GO Profile Rank" on accountmain
     int cs2_player_xp    = -1;             // XP earned towards next CS2 rank
-    bool prime_status = false;             // inferred from cs2_player_level + xp
+    // Prime. Steam tells only the account itself, so the value is exact once the account has
+    // connected to the Game Coordinator (prime_confirmed). Until then it is an estimate from
+    // level and XP, which is wrong both ways: it misses an account that bought Prime and has
+    // not played, and it counts one that earned XP before June 2021, when accounts without
+    // Prime still gained it. Write both through set_cs2_progress / set_prime_confirmed.
+    bool prime_status = false;
+    bool prime_confirmed = false;
     bool vac_live = false;                 // mirrors BanStatus.vac_banned
     std::int64_t cooldown_expires_unix = 0;  // 0 = none, kCooldownNever = permanent
     std::string cooldown_reason;           // "Griefing", "Untrusted", "Team Damage", "Abandon"
@@ -141,6 +147,25 @@ struct CS2Status {
     std::uint32_t featured_medal_defidx = 0;  // pinned medal def_index, 0 = none
     std::vector<CS2Medal> medals;             // displayed medals/coins, resolved name + icon
 };
+
+// Stores the CS2 level and XP a profile or the GCPD pages reported (-1 = not reported, kept
+// as it was) and re-estimates Prime from them. A confirmed Prime value stays, with one
+// exception: only accounts with Prime gain XP, so a level above the one a confirmed "no" was
+// read at means the account got Prime since, and the value goes back to an estimate.
+inline void set_cs2_progress(CS2Status& cs2, int level, int xp) {
+    const bool leveled_up = level > 1 && level > cs2.cs2_player_level;
+    if (level >= 0) cs2.cs2_player_level = level;
+    if (xp >= 0) cs2.cs2_player_xp = xp;
+    if (cs2.prime_confirmed && (cs2.prime_status || !leveled_up)) return;
+    cs2.prime_confirmed = false;
+    cs2.prime_status = cs2.cs2_player_level > 1 || cs2.cs2_player_xp > 0;
+}
+
+// Stores Prime as the Game Coordinator reported it to the account itself.
+inline void set_prime_confirmed(CS2Status& cs2, bool prime) {
+    cs2.prime_status = prime;
+    cs2.prime_confirmed = true;
+}
 
 // "TotalSpend" from help.steampowered.com/accountdata/AccountSpend.
 struct ExternalFundsStatus {

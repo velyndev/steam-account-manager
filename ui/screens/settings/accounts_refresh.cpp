@@ -52,7 +52,7 @@ void draw_sources(Page& p) {
     }
 
     toggle_row(p, "GCPD scraper", &p.s.gcpd_enabled, p.d.gcpd_enabled,
-               "Reads Premier rating, Wingman rank, Prime and cooldown from your account's CS2 pages on Steam. "
+               "Reads Premier rating, Wingman rank, CS2 level and cooldown from your account's CS2 pages on Steam. "
                "Needs a full login (Add account, Full login).",
                "gcpd scrape scraper premier wingman prime cooldown rank");
 }

@@ -83,7 +83,7 @@ long long sort_value(const app::AppState& state, const core::Account& a, int col
         case kCs2Level: return a.cs2.cs2_player_level;
         case kSteamLevel: return a.web.steam_level;
         case kGames: return a.web.owned_games_count;
-        case kPrime: return a.cs2.prime_status ? 1 : 0;
+        case kPrime: return !a.cs2.prime_status ? 0 : a.cs2.prime_confirmed ? 2 : 1;
         case kDrop: return kit::weekly_drop_claimed(a, now) ? 1 : 0;
         case kLastSignIn: return a.last_login_unix;
         case kSpent: return a.funds.total_spend_usd_cents;
@@ -166,7 +166,13 @@ void cells(app::AppState& state, core::Account& a, std::int64_t now) {
     if (ImGui::TableNextColumn()) number_cell(a.cs2.cs2_player_level);
     if (ImGui::TableNextColumn()) number_cell(a.web.steam_level);
     if (ImGui::TableNextColumn()) number_cell(a.web.owned_games_count);
-    if (ImGui::TableNextColumn() && a.cs2.prime_status) text_cell("Prime");
+    if (ImGui::TableNextColumn() && a.cs2.prime_status) {
+        // Exact only once the account itself has connected to the Game Coordinator; the
+        // estimate from level and XP reads as one and says how to check it.
+        kit::RowCell cell;
+        facet::StyledText(a.cs2.prime_confirmed ? "Prime" : "Likely", {.secondary = !a.cs2.prime_confirmed});
+        if (!a.cs2.prime_confirmed) facet::ItemTooltip("%s", kit::prime_estimate_hint(state).c_str());
+    }
     if (ImGui::TableNextColumn() && kit::weekly_drop_claimed(a, now)) {
         kit::RowCell cell;
         facet::Badge("Claimed", {.tone = facet::Tone::Success, .icon = icons::weekly_drop});

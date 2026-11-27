@@ -134,6 +134,7 @@ void begin_connect(AppState& st, GcAutoPull& g) {
             snap.medals = std::move(pp.medals);
             snap.featured_medal_defidx = pp.featured_medal_defidx;
             snap.ranks = pp.ranks;
+            snap.prime = pp.prime;
             stp->apply_gc_snapshot_cache(it->second, snap);
             ++g.received;
             g.status = "Pulling GC " + std::to_string(g.received) + "/" + std::to_string(g.total);
@@ -261,6 +262,7 @@ void begin_validate(AppState& st) {
             snap.medals = std::move(pp.medals);
             snap.featured_medal_defidx = pp.featured_medal_defidx;
             snap.ranks = pp.ranks;
+            snap.prime = pp.prime;
             stp->apply_gc_snapshot_cache(v.current_id, snap);
             v.profile_applied = true;
         });

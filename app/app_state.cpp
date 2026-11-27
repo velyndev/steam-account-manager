@@ -156,12 +156,9 @@ void AppState::apply_gc_snapshot_cache(const std::string& account_id,
                          .count();
     acc->cs2.gc_last_pulled_unix = now;
     if (snap.progress.valid) {
-        acc->cs2.cs2_player_level = snap.progress.level;
-        acc->cs2.cs2_player_xp = snap.progress.xp_in_level;
-
-        acc->cs2.prime_status =
-            snap.progress.level > 1 || snap.progress.xp_in_level > 0;
+        core::set_cs2_progress(acc->cs2, snap.progress.level, snap.progress.xp_in_level);
     }
+    if (snap.prime >= 0) core::set_prime_confirmed(acc->cs2, snap.prime == 1);
     acc->cs2.featured_medal_defidx = snap.featured_medal_defidx;
     acc->cs2.medals.clear();
     acc->cs2.medals.reserve(snap.medals.size());

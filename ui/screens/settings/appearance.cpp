@@ -145,8 +145,9 @@ void draw_account_views(Page& p) {
                   {facet::ChoiceItem{"Steam level"}, facet::ChoiceItem{"Owned games"}, facet::ChoiceItem{"Steam ID"},
                    facet::ChoiceItem{"External funds"}});
     info_group<5>(p, "CS2 standing",
-                  "Ranks and Prime need the GCPD scraper or the Game Coordinator; cooldown and the weekly drop "
-                  "need the Game Coordinator.",
+                  "Ranks need the GCPD scraper or the Game Coordinator; cooldown and the weekly drop need the "
+                  "Game Coordinator. Prime is exact once an account has connected to the Game Coordinator "
+                  "itself, and estimated from level and XP until then.",
                   "premier rating wingman rank prime cooldown weekly drop xp cs2",
                   {&i.show_premier, &i.show_wingman, &i.show_prime, &i.show_cooldown, &i.show_weekly_drop},
                   {d.show_premier, d.show_wingman, d.show_prime, d.show_cooldown, d.show_weekly_drop},

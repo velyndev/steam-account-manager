@@ -50,5 +50,10 @@ enum NotifyRequest : std::uint32_t {
 // SO cache type ids (ESOType).
 inline constexpr int kSoTypeEconItem = 1;
 inline constexpr int kSoTypePersonalStore = 4;
+inline constexpr int kSoTypeGameAccountClient = 7;
+
+// CSOEconGameAccountClient.elevated_state of an account with Prime. An account without Prime
+// leaves the field out.
+inline constexpr std::uint32_t kElevatedStatePrime = 5;
 
 }  // namespace sam::cs2_gc

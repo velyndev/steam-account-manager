@@ -213,6 +213,7 @@ core::Account make_account(int i, std::int64_t now) {
     a.prev_snapshot.snapshot_unix = now - 1800;
 
     a.cs2.prime_status = i % 2 == 0 || i % 7 == 3;
+    a.cs2.prime_confirmed = i % 5 != 0;  // every fifth account shows the estimate
     a.cs2.premier_rating = (i % 6 == 5) ? -1 : 2500 + (i * 1789) % 27000;
     a.cs2.premier_wins = a.cs2.premier_rating > 0 ? 10 + (i * 7) % 180 : -1;
     a.cs2.wingman_rank = (i % 4 == 3) ? -1 : 1 + (i * 5) % 18;

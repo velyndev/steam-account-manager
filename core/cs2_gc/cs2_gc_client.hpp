@@ -78,6 +78,8 @@ struct Snapshot {
     std::vector<DisplayItem> medals;  // profile medals/coins, id = def_index
     std::uint32_t featured_medal_defidx = 0;  // pinned medal def_index, 0 = none
     ProfileRanks ranks;  // competitive standing + cooldown (-1 = unknown)
+    // Prime as the GC reports it to the account itself: -1 = unknown, 0 = no, 1 = yes.
+    int prime = -1;
 };
 
 // A resolved foreign-profile pull for one account: exactly the slice
@@ -88,6 +90,7 @@ struct ProfilePull {
     std::vector<DisplayItem> medals;
     std::uint32_t featured_medal_defidx = 0;
     ProfileRanks ranks;
+    int prime = -1;  // as Snapshot::prime; known only when the pull is the puller's own profile
 };
 
 struct Cs2Credentials {

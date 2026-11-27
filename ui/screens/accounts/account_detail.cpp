@@ -583,10 +583,10 @@ void steam_card(app::AppState& state, core::Account& a) {
         if (!first) row_rule();
         first = false;
     };
-    if (info.show_prime && a.cs2.cs2_player_level >= 0) {
+    if (info.show_prime && (a.cs2.prime_confirmed || a.cs2.cs2_player_level >= 0)) {
         rule();
         facet::BeginSettingsRow("Prime");
-        row_text(a.cs2.prime_status ? "Yes" : "No", !a.cs2.prime_status);
+        row_text(kit::prime_detail_text(state, a).c_str(), !(a.cs2.prime_confirmed && a.cs2.prime_status));
         facet::EndSettingsRow();
     }
     if (info.show_steam_id && a.steam_id_64 != 0) {

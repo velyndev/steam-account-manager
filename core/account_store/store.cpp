@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -25,6 +26,18 @@ namespace sam::core {
 using json = nlohmann::json;
 
 namespace {
+
+// Versions up to 2.0.0 read the Game Coordinator's signed "seconds remaining" as unsigned, so
+// a cooldown that had already run out was saved as one ending 68 to 136 years ahead. A real
+// timed cooldown ends within about a year, so an expiry decades out is dropped on load.
+std::int64_t sane_cooldown_expiry(std::int64_t expires_unix) {
+    constexpr std::int64_t kDecades = 20LL * 365 * 86400;
+    if (expires_unix == kCooldownNever) return expires_unix;
+    const std::int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+                                 std::chrono::system_clock::now().time_since_epoch())
+                                 .count();
+    return expires_unix > now + kDecades ? 0 : expires_unix;
+}
 
 std::string secure_to_string(const crypto::SecureString& s) {
     return std::string(s.begin(), s.end());
@@ -176,6 +189,7 @@ void to_json(json& j, const CS2Status& c) {
         {"cs2_player_level",     c.cs2_player_level},
         {"cs2_player_xp",        c.cs2_player_xp},
         {"prime_status",         c.prime_status},
+        {"prime_confirmed",      c.prime_confirmed},
         {"vac_live",             c.vac_live},
         {"cooldown_expires_unix", c.cooldown_expires_unix},
         {"cooldown_reason",      c.cooldown_reason},
@@ -206,7 +220,8 @@ void from_json(const json& j, PreviousSnapshot& p) {
     p.community_banned      = j.value("community_banned", false);
     p.economy_ban           = j.value("economy_ban", std::string{});
     p.vac_live              = j.value("vac_live", false);
-    p.cooldown_expires_unix = j.value("cooldown_expires_unix", static_cast<std::int64_t>(0));
+    p.cooldown_expires_unix =
+        sane_cooldown_expiry(j.value("cooldown_expires_unix", static_cast<std::int64_t>(0)));
     p.snapshot_unix         = j.value("snapshot_unix", static_cast<std::int64_t>(0));
 }
 
@@ -218,8 +233,10 @@ void from_json(const json& j, CS2Status& c) {
     c.cs2_player_level      = j.value("cs2_player_level", -1);
     c.cs2_player_xp         = j.value("cs2_player_xp", -1);
     c.prime_status          = j.value("prime_status", false);
+    c.prime_confirmed       = j.value("prime_confirmed", false);
     c.vac_live              = j.value("vac_live", false);
-    c.cooldown_expires_unix = j.value("cooldown_expires_unix", static_cast<std::int64_t>(0));
+    c.cooldown_expires_unix =
+        sane_cooldown_expiry(j.value("cooldown_expires_unix", static_cast<std::int64_t>(0)));
     c.cooldown_reason       = j.value("cooldown_reason", std::string{});
     c.weekly_drop_reset_unix = j.value("weekly_drop_reset_unix", static_cast<std::int64_t>(0));
     c.weekly_drop_claimed_generation =

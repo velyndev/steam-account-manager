@@ -343,6 +343,16 @@ void GcSession::load_personal_store(const std::string& data) {
     ++so_seq_;
 }
 
+void GcSession::load_game_account(const std::string& data) {
+    CSOEconGameAccountClient ga;
+    if (!ga.ParseFromString(data)) return;
+    const int prime = ga.elevated_state() == kElevatedStatePrime ? 1 : 0;
+    if (prime == prime_) return;
+    SAM_LOG_INFO("gc: game account elevated_state={} (prime={})", ga.elevated_state(), prime);
+    prime_ = prime;
+    ++so_seq_;
+}
+
 void GcSession::on_gc_message(std::uint32_t gc_emsg, const std::string& body) {
     switch (gc_emsg) {
         case GcMsg::ClientWelcome: {
@@ -354,6 +364,8 @@ void GcSession::on_gc_message(std::uint32_t gc_emsg, const std::string& body) {
                         for (const auto& d : sub.object_data()) upsert_econ_item(d);
                     else if (sub.type_id() == kSoTypePersonalStore) {
                         if (sub.object_data_size() > 0) load_personal_store(sub.object_data(0));
+                    } else if (sub.type_id() == kSoTypeGameAccountClient) {
+                        if (sub.object_data_size() > 0) load_game_account(sub.object_data(0));
                     } else
                         for (const auto& d : sub.object_data()) on_unknown_so(sub.type_id(), d);
                 }
@@ -369,6 +381,8 @@ void GcSession::on_gc_message(std::uint32_t gc_emsg, const std::string& body) {
                     for (const auto& d : sub.object_data()) upsert_econ_item(d);
                 else if (sub.type_id() == kSoTypePersonalStore) {
                     if (sub.object_data_size() > 0) load_personal_store(sub.object_data(0));
+                } else if (sub.type_id() == kSoTypeGameAccountClient) {
+                    if (sub.object_data_size() > 0) load_game_account(sub.object_data(0));
                 } else
                     for (const auto& d : sub.object_data()) on_unknown_so(sub.type_id(), d);
             }
@@ -380,6 +394,7 @@ void GcSession::on_gc_message(std::uint32_t gc_emsg, const std::string& body) {
             if (!so.ParseFromString(body)) return;
             if (so.type_id() == kSoTypeEconItem) upsert_econ_item(so.object_data());
             else if (so.type_id() == kSoTypePersonalStore) load_personal_store(so.object_data());
+            else if (so.type_id() == kSoTypeGameAccountClient) load_game_account(so.object_data());
             else on_unknown_so(so.type_id(), so.object_data());
             return;
         }
@@ -395,6 +410,7 @@ void GcSession::on_gc_message(std::uint32_t gc_emsg, const std::string& body) {
             for (const auto& obj : mo.objects_modified()) {
                 if (obj.type_id() == kSoTypeEconItem) upsert_econ_item(obj.object_data());
                 else if (obj.type_id() == kSoTypePersonalStore) load_personal_store(obj.object_data());
+                else if (obj.type_id() == kSoTypeGameAccountClient) load_game_account(obj.object_data());
                 else on_unknown_so(obj.type_id(), obj.object_data());
             }
             return;
@@ -422,9 +438,11 @@ void GcSession::on_gc_message(std::uint32_t gc_emsg, const std::string& body) {
             const auto own = static_cast<std::uint32_t>(cm_.steam_id() & 0xffffffffULL);
             if (h.account_id() != own) return;
             const auto now = static_cast<std::int64_t>(std::time(nullptr));
+            // The proto declares penalty_seconds unsigned, but the GC sends signed seconds
+            // remaining: a cooldown that has run out arrives as a negative number.
+            const auto remaining = static_cast<std::int32_t>(h.penalty_seconds());
             own_penalty_.seen = true;
-            own_penalty_.expires =
-                h.penalty_seconds() > 0 ? now + static_cast<std::int64_t>(h.penalty_seconds()) : 0;
+            own_penalty_.expires = remaining > 0 ? now + remaining : 0;
             return;
         }
         case GcMsg::PlayersProfile: {
@@ -461,6 +479,7 @@ void GcSession::on_gc_message(std::uint32_t gc_emsg, const std::string& body) {
                     player_xp_.featured_medal_defidx = r.featured_medal_defidx;
                     player_xp_.medal_defidx = r.medal_defidx;
                     player_xp_.valid = true;
+                    r.prime = prime_;
 
                     if (own_penalty_.seen) {
                         r.cooldown_expires_unix = own_penalty_.expires;

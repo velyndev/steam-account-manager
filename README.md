@@ -150,9 +150,12 @@ No installer and no telemetry, and the vaults never leave your machine.
 - Per-account VAC / game / community / trade ban flags, Steam level, and owned games. These
   need a free Steam Web API key, entered in Settings > Accounts and refresh and saved as plain
   text in the vault's `settings.json` (see [SECURITY.md](SECURITY.md)).
-- CS2 Premier rating, Wingman rank, Prime status and competitive cooldown, read from the
-  account's CS2 pages on Steam (GCPD, needs a full login). VAC live comes from the CS2 Game
-  Coordinator.
+- CS2 Premier rating, Wingman rank, level and competitive cooldown, read from the account's
+  CS2 pages on Steam (GCPD, needs a full login). VAC live comes from the CS2 Game Coordinator.
+- Prime status. Steam tells only the account itself, so it is exact once the account has
+  connected to the CS2 Game Coordinator (on the CS2 screen, or in the check token-only
+  accounts get on refresh). Until then it is an estimate from the CS2 level and XP, shown as
+  "Likely" or "Unknown".
 - External funds (total spend) per account, read from Steam Support with one sign-in per account.
 - New bans, cooldown changes, and VAC live flips surface as marks in the account list, in-app
   toasts, and optional Windows tray notifications, and are logged. Every indicator is toggleable.

@@ -579,16 +579,8 @@ void AppState::refresh_single_account(const std::string& id, bool batch_refresh,
                 cs2_touched = true;
             }
             if (am_parsed && am_parsed->ok) {
-                if (am_parsed->cs2_player_level >= 0) {
-                    a->cs2.cs2_player_level = am_parsed->cs2_player_level;
-                }
-                if (am_parsed->cs2_player_xp >= 0) {
-                    a->cs2.cs2_player_xp = am_parsed->cs2_player_xp;
-                }
-
-                const bool level_above_1 = am_parsed->cs2_player_level > 1;
-                const bool has_any_xp    = am_parsed->cs2_player_xp > 0;
-                a->cs2.prime_status = level_above_1 || has_any_xp;
+                core::set_cs2_progress(a->cs2, am_parsed->cs2_player_level,
+                                       am_parsed->cs2_player_xp);
                 cs2_touched = true;
             }
 
