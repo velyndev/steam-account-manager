@@ -187,16 +187,28 @@ void do_launch(app::AppState& state, core::Account& a, bool use_token) {
     }
 }
 
+// Generates the profile this launch spoofs with before Steam starts, so an account never signs
+// in with the identifiers another account already used: a first profile for an account that
+// has none yet, and a new one on every launch when the setting asks for it.
+void prepare_hwid_profile(app::AppState& state, core::Account& a) {
+    if (!hwid_spoofed(state, a)) return;
+    if (a.hwid.has_value() && !state.settings.hwid.new_profile_every_launch) return;
+    a.hwid = core::hwid::generate_profile();
+    state.vault_dirty = true;
+    state.save_vault_if_dirty();
+}
+
 }  // namespace
+
+bool hwid_spoofed(const app::AppState& state, const core::Account& a) {
+    if (state.settings.safe_mode) return false;
+    return state.settings.hwid.always_spoof ? !a.hwid_excluded : a.hwid.has_value();
+}
 
 void sign_in(app::AppState& state, core::Account& a) {
     screen().last_sign_in_id = a.id;
     state.flush_pending_save();
-    if (!state.settings.safe_mode && state.settings.hwid.always_spoof && !a.hwid_excluded && !a.hwid.has_value()) {
-        a.hwid = core::hwid::generate_profile();
-        state.vault_dirty = true;
-        state.save_vault_if_dirty();
-    }
+    prepare_hwid_profile(state, a);
 
     const bool use_token = !a.is_nfa && state.effective_sign_in_method(a.id) == app::SignInMethod::TokenInject;
     state.cm_relaunch_attempted.erase(a.id);

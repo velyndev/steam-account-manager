@@ -108,6 +108,10 @@ bool multi_selection(const app::AppState& state);
 
 // The sign-in flow: HWID profile, token minting, launch, toasts.
 void sign_in(app::AppState& state, core::Account& account);
+// Whether the HWID spoofer covers this account's launches: with Spoof every launch on, every
+// account that is not excluded; otherwise only the accounts given a profile from their menu.
+// False in safe mode.
+bool hwid_spoofed(const app::AppState& state, const core::Account& account);
 // Puts the current Steam Guard code on the clipboard with auto clear and confirms with a toast.
 void copy_code(app::AppState& state, const core::Account& account);
 // Refreshes Steam data, spend (full access) and the GC validation of one account.

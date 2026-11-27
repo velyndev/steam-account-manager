@@ -134,6 +134,7 @@ void visit_pending(app::Settings& a, const app::Settings& b, F&& f) {
     SAM_PENDING(cs2_gc.cache_hours);
 
     SAM_PENDING(hwid.always_spoof);
+    SAM_PENDING(hwid.new_profile_every_launch);
     SAM_PENDING(hwid.component_mask);
 
     SAM_PENDING(cleaner.enabled);

@@ -309,6 +309,9 @@ struct Settings {
 
     struct HwidToggles {
         bool always_spoof = false;
+        // Gives every spoofed account a freshly generated profile before each launch instead
+        // of the one it kept from its first spoofed launch.
+        bool new_profile_every_launch = false;
         std::uint32_t component_mask = 0x3FFu;
     } hwid;
 

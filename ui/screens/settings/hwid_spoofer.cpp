@@ -145,6 +145,11 @@ void draw_hwid_spoofer(Page& p) {
                "Spoofs the hardware identifiers for every account you launch. Leave single accounts out from "
                "their menu on Accounts.",
                "always spoof hwid hardware launch");
+    toggle_row(p, "New profile every launch", &p.s.hwid.new_profile_every_launch,
+               p.d.hwid.new_profile_every_launch,
+               "Generates fresh hardware identifiers each time a spoofed account launches, so no two sign-ins of "
+               "an account share them. When off, an account keeps the profile it got on its first spoofed launch.",
+               "new fresh regenerate profile every launch hwid");
     draw_components(p);
     draw_comparison(p);
 }

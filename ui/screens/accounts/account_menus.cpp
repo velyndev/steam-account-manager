@@ -120,7 +120,10 @@ void hwid_menu(app::AppState& state, core::Account& a) {
         a.hwid = core::hwid::generate_profile();
         save(state);
     }
-    if (enabled && facet::MenuItem("Generate a new profile")) {
+    // Also offered before an account's first launch, so a newly added account can get its
+    // profile up front. Hidden while every launch generates one anyway.
+    if (hwid_spoofed(state, a) && !state.settings.hwid.new_profile_every_launch &&
+        facet::MenuItem(enabled ? "Generate a new profile" : "Generate a profile")) {
         a.hwid = core::hwid::generate_profile();
         save(state);
     }

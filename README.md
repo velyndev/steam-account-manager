@@ -215,9 +215,12 @@ No installer and no telemetry, and the vaults never leave your machine.
 - Spoofable components: machine GUID, MAC address, disk serial, PC name, GPU, motherboard,
   RAM, monitor, storage, and sound card, each individually toggleable.
 - Per-account hardware profiles: each account gets its own randomly generated profile, or is
-  excluded from spoofing entirely, from its right-click menu.
+  excluded from spoofing entirely, from its right-click menu. A newly added account can get its
+  profile there before its first sign-in.
 - "Spoof every launch" applies a profile to every launch; the per-component mask picks exactly
   which identifiers are replaced.
+- "New profile every launch" generates a fresh profile before each launch instead of keeping
+  the one an account got the first time.
 - Hardware comparison table in Settings shows real vs. spoofed values side by side.
 
 ### Background refresh

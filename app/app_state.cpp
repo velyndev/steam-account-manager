@@ -433,6 +433,7 @@ void AppState::save_vault_settings() {
 
     auto& hj = j["hwid"];
     hj["always_spoof"]   = settings.hwid.always_spoof;
+    hj["new_profile_every_launch"] = settings.hwid.new_profile_every_launch;
     hj["component_mask"] = settings.hwid.component_mask;
 
     auto& clj = j["cleaner"];
@@ -742,6 +743,7 @@ void AppState::load_vault_settings() {
             }
         };
         get_h("always_spoof",   settings.hwid.always_spoof);
+        get_h("new_profile_every_launch", settings.hwid.new_profile_every_launch);
         get_h("component_mask", settings.hwid.component_mask);
     }
 
